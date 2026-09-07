@@ -77,6 +77,13 @@ One dependency comes with it, fetched the same way and needing nothing from
 you: [Fluxion Dyn](https://github.com/kisstp2006/fluxion-dyn), which is how
 every backend is opened.
 
+One more is named in `build.zig.zon` and is *not* fetched for you:
+[Fluxion Vulkan](https://github.com/kisstp2006/fluxion-vulkan), which the
+Vulkan example makes its instance with. It is `lazy`, and `build.zig` asks for
+it only when this is the package being built - a program that depends on
+`fluxion_platform` downloads nothing of Vulkan, and the library links nothing
+of it. Pass `-Dexamples=false` to skip it in a checkout of this repository too.
+
 ## The short version
 
 ```zig
@@ -227,7 +234,9 @@ exists or never gets one.
 
 **Nothing here loads a GL function.** `win.getProcAddress` is the whole of it;
 sorting what it returns into a table is a loader's job, and `fluxion-gl` is
-the one to use. Note that a non-null answer is not proof a function exists —
+the one to use. The window is itself a resolver in `fluxion-dyn`'s sense - it
+has a `get` - so `api.load(win)` is the whole handover, with no wrapper and no
+`Chain`: the backend already looks in both places a command can be. Note that a non-null answer is not proof a function exists —
 EGL is allowed to return a dispatch stub for any `gl` name, and Mesa does.
 
 Vulkan is two calls and no linking:
@@ -393,7 +402,7 @@ zig build example          # what this machine's windowing is, opening nothing
 zig build example-window   # a window, and every event it produces
 zig build example-gl       # an OpenGL context, clearing to a colour that moves
 zig build example-text     # typing, and the difference between a key and a letter
-zig build example-vulkan   # an instance, and the surface made from a window
+zig build example-vulkan   # an instance from fluxion-vulkan, and the surface made from a window
 ```
 
 The second takes `--frames N` so a run ends on its own.

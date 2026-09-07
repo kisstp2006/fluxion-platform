@@ -6,9 +6,21 @@
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x47f9b05151a3c35a,
     .dependencies = .{
+        // The library's one dependency.
         .fluxion_dyn = .{
             .url = "git+https://github.com/kisstp2006/fluxion-dyn#27e7ba0dffff86887801afc7d312bfcdaff1c54f",
             .hash = "fluxion_dyn-0.1.0-5Dy8EU9PAQAp7cuNi6RU8eu0pgcFXWUbrBq69b7idVnA",
+        },
+
+        // What the Vulkan example makes its instance with. Lazy: fetched only
+        // when the examples are built, which is when this is the root package
+        // or `-Dexamples` is given. The library links nothing of Vulkan and
+        // loads nothing of it; a program that depends on `fluxion_platform`
+        // never downloads this.
+        .fluxion_vulkan = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-vulkan#4ee1fefeb14b5d64d3c305770ed0e9fea15eddce",
+            .hash = "fluxion_vulkan-0.1.0-8VC-cXi2BACsGRvxlmsdVwPAn1sLLUTCkh26YIJv5w_l",
+            .lazy = true,
         },
     },
     .paths = .{

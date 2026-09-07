@@ -45,6 +45,43 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the library test suite");
     test_step.dependOn(&run_tests.step);
 
+    // zig build docs -> zig-out/docs
+    const docs_lib = b.addLibrary(.{
+        .name = "fluxion-platform",
+        .root_module = mod,
+    });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate API documentation into zig-out/docs");
+    docs_step.dependOn(&install_docs.step);
+
+    // -------------------------------------------------------------------
+    // Examples
+    // -------------------------------------------------------------------
+
+    // The Vulkan example makes its instance with `fluxion-vulkan`, which is
+    // a lazy dependency: fetched only when the examples are actually wanted,
+    // which is when this is the package being built and not when it is
+    // somebody else's dependency. `-Dexamples=false` builds the library's own
+    // tests alone; `-Dexamples=true` asks for them from inside another package.
+    const examples_wanted = b.option(
+        bool,
+        "examples",
+        "Build the examples and their tests (pulls fluxion-vulkan)",
+    ) orelse (b.pkg_hash.len == 0);
+    if (!examples_wanted) return;
+
+    // On the first run after a clean checkout this comes back null and the
+    // build runner fetches it and starts again, so returning here is not
+    // giving up - it is the first half of the fetch.
+    const vulkan_dep = b.lazyDependency("fluxion_vulkan", .{
+        .target = target,
+        .optimize = optimize,
+    }) orelse return;
+
     // zig build example runs the tour; zig build example-<name> runs one of the
     // others; zig build examples runs all of them, in this order.
     const examples = [_]struct {
@@ -95,10 +132,11 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "fluxion_platform", .module = mod },
-                // The Vulkan example loads the Vulkan loader itself, because
-                // that is what a program with its own binding does - this
-                // library never links Vulkan.
-                .{ .name = "fluxion_dyn", .module = dyn.module("fluxion_dyn") },
+                // The Vulkan example brings its own binding, because that is
+                // what a program does - this library never links Vulkan, and
+                // `createVulkanSurface` takes the binding's
+                // `vkGetInstanceProcAddr` rather than finding one itself.
+                .{ .name = "fluxion_vulkan", .module = vulkan_dep.module("fluxion_vulkan") },
             },
             .link_libc = if (needs_libc) true else null,
         });
@@ -131,17 +169,4 @@ pub fn build(b: *std.Build) void {
         });
         test_step.dependOn(&b.addRunArtifact(example_tests).step);
     }
-
-    // zig build docs -> zig-out/docs
-    const docs_lib = b.addLibrary(.{
-        .name = "fluxion-platform",
-        .root_module = mod,
-    });
-    const install_docs = b.addInstallDirectory(.{
-        .source_dir = docs_lib.getEmittedDocs(),
-        .install_dir = .prefix,
-        .install_subdir = "docs",
-    });
-    const docs_step = b.step("docs", "Generate API documentation into zig-out/docs");
-    docs_step.dependOn(&install_docs.step);
 }

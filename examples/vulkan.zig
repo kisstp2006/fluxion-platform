@@ -5,65 +5,32 @@
 //! The whole of what this library does for Vulkan: say which instance
 //! extensions this session needs, and turn a window into a surface. Everything
 //! after that - the physical device, the swapchain, the render pass - belongs
-//! to the program, and `fluxion-vulkan` is the binding to write it against.
+//! to the program, and `fluxion-vulkan` is the binding to write it against. So
+//! that is what this example writes it against.
 //!
-//! **The Vulkan loaded here is the example's, not the library's.** Just enough
-//! of it to make an instance and prove the surface is real: a handful of
-//! structs and four entry points, through `fluxion-dyn`. A real program already
-//! has all of this from its own binding, which is exactly why
-//! `createVulkanSurface` takes a `vkGetInstanceProcAddr` rather than looking
-//! for one itself.
+//! **Two libraries, one seam.** `fluxion-vulkan` finds the loader and makes the
+//! instance; this library makes the surface. They meet at exactly two values:
+//! the instance, and the `vkGetInstanceProcAddr` the loader kept. Both cross
+//! as integers, because a windowing library that declared `VkInstance` would
+//! be declaring half of `vulkan.h` to go with it - so the cast happens here,
+//! where both sides' types are known, and nowhere else.
+//!
+//! `fluxion_vulkan` is a lazy dependency: fetched for this example, never for
+//! the library, which links nothing and loads nothing of Vulkan itself.
 
 const std = @import("std");
 const Io = std.Io;
 
-const dyn = @import("fluxion_dyn");
 const platform = @import("fluxion_platform");
-
-/// `VK_STRUCTURE_TYPE_APPLICATION_INFO` and `..._INSTANCE_CREATE_INFO`.
-const st_application_info: u32 = 0;
-const st_instance_create_info: u32 = 1;
-/// `VK_API_VERSION_1_0`.
-const api_version_1_0: u32 = 1 << 22;
-
-const ApplicationInfo = extern struct {
-    s_type: u32 = st_application_info,
-    next: ?*const anyopaque = null,
-    application_name: ?[*:0]const u8 = null,
-    application_version: u32 = 0,
-    engine_name: ?[*:0]const u8 = null,
-    engine_version: u32 = 0,
-    api_version: u32 = api_version_1_0,
-};
-
-const InstanceCreateInfo = extern struct {
-    s_type: u32 = st_instance_create_info,
-    next: ?*const anyopaque = null,
-    flags: u32 = 0,
-    application_info: ?*const ApplicationInfo = null,
-    enabled_layer_count: u32 = 0,
-    enabled_layer_names: ?[*]const [*:0]const u8 = null,
-    enabled_extension_count: u32 = 0,
-    enabled_extension_names: ?[*]const [*:0]const u8 = null,
-};
-
-const Proc = *const fn () callconv(.c) void;
-const GetInstanceProcAddr = *const fn (usize, [*:0]const u8) callconv(.c) ?Proc;
-
-/// The loader, by the name each platform gives it.
-const loaders: []const [:0]const u8 = &.{
-    "vulkan-1.dll",
-    "libvulkan.so.1",
-    "libvulkan.so",
-    "libvulkan.1.dylib",
-};
+const vk = @import("fluxion_vulkan");
 
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
     const out = &stdout.interface;
+    const gpa = init.arena.allocator();
 
-    var ctx = platform.Context.init(init.arena.allocator(), .{}) catch |err| {
+    var ctx = platform.Context.init(gpa, .{}) catch |err| {
         try out.print("no display: {t}\n", .{err});
         try out.flush();
         return;
@@ -76,56 +43,33 @@ pub fn main(init: std.process.Init) !void {
     try out.print("{t} needs:\n", .{ctx.backend()});
     for (extensions) |name| try out.print("   {s}\n", .{std.mem.span(name)});
 
-    var lib = dyn.Library.openAny(loaders) catch {
-        try out.writeAll("\nno Vulkan loader on this machine, which is an answer\n");
+    // The loader, by whichever name this platform gives it. Not linked: a
+    // machine with no driver is a machine this program still starts on.
+    var loader = vk.Loader.init() catch |err| {
+        try out.print("\nno Vulkan loader on this machine ({t}), which is an answer\n", .{err});
         try out.flush();
         return;
     };
-    defer lib.close();
+    defer loader.deinit();
+    try out.print("\nloader: {s}, Vulkan {f}\n", .{ loader.name() orelse "?", try loader.apiVersion() });
 
-    const get_proc = lib.lookup(GetInstanceProcAddr, "vkGetInstanceProcAddr") orelse {
-        try out.writeAll("\nthat library is not a Vulkan loader\n");
-        try out.flush();
-        return;
-    };
-
-    // A null instance is how the three calls that exist before one is made are
-    // looked up. It is not an error - it is the documented way in.
-    const create_instance: *const fn (
-        *const InstanceCreateInfo,
-        ?*const anyopaque,
-        *usize,
-    ) callconv(.c) i32 = @ptrCast(get_proc(0, "vkCreateInstance") orelse {
-        try out.writeAll("\nno vkCreateInstance\n");
-        try out.flush();
-        return;
-    });
-
-    const app: ApplicationInfo = .{
+    const app: vk.ApplicationInfo = .{
         .application_name = "fluxion-platform",
         .engine_name = "fluxion",
     };
-    const info: InstanceCreateInfo = .{
-        .application_info = &app,
-        .enabled_extension_count = @intCast(extensions.len),
-        .enabled_extension_names = extensions.ptr,
-    };
+    var info: vk.InstanceCreateInfo = .{ .application_info = &app };
+    info.setExtensions(extensions);
 
-    var instance: usize = 0;
-    const result = create_instance(&info, null, &instance);
-    if (result != 0) {
+    const instance = loader.createInstance(&info, null) catch |err| {
         // The usual cause is a driver without the platform surface extension -
         // a headless container, or a loader with no ICD installed.
-        try out.print("\nvkCreateInstance failed: {d}\n", .{result});
+        try out.print("vkCreateInstance failed: {t}\n", .{err});
         try out.flush();
         return;
-    }
-
-    const destroy_instance: *const fn (usize, ?*const anyopaque) callconv(.c) void =
-        @ptrCast(get_proc(instance, "vkDestroyInstance").?);
-    defer destroy_instance(instance, null);
-
-    try out.writeAll("\ninstance created\n");
+    };
+    const cmds = try loader.instanceCommands(instance);
+    defer cmds.destroyInstance(instance, null);
+    try out.writeAll("instance created\n");
 
     const win = try ctx.createWindow(.{
         .title = "fluxion-platform: Vulkan",
@@ -134,8 +78,14 @@ pub fn main(init: std.process.Init) !void {
     });
     defer win.destroy();
 
-    // The one call this library exists for here.
-    const surface = win.createVulkanSurface(instance, get_proc, null) catch |err| {
+    // The one call this library exists for here. The instance goes across as
+    // an integer and the surface comes back as one; the loader's own
+    // `vkGetInstanceProcAddr` goes with it, so nothing is loaded twice.
+    const surface = win.createVulkanSurface(
+        @intFromPtr(instance),
+        @ptrCast(loader.getInstanceProcAddr),
+        null,
+    ) catch |err| {
         try out.print("no surface: {t}\n", .{err});
         try out.flush();
         return;
@@ -144,14 +94,16 @@ pub fn main(init: std.process.Init) !void {
 
     // Destroyed before the window and before the instance, which is the order
     // the specification requires and the order this library will not do for
-    // you - it never had the instance.
-    const destroy_surface: *const fn (usize, u64, ?*const anyopaque) callconv(.c) void =
-        @ptrCast(get_proc(instance, "vkDestroySurfaceKHR").?);
+    // you - it never had the instance. `vkDestroySurfaceKHR` is an extension
+    // command, so it is not in the binding's tables; the resolver finds it.
+    const resolver = loader.instanceResolver(instance);
+    const DestroySurface = *const fn (vk.Instance, u64, ?*const vk.AllocationCallbacks) callconv(vk.call) void;
+    const destroy_surface: DestroySurface = @ptrCast(resolver.lookup("vkDestroySurfaceKHR").?);
     defer destroy_surface(instance, surface, null);
 
     // Proof that it is a real surface rather than a number: ask the driver
     // whether a queue on the first device could present to it.
-    try reportPresentation(out, get_proc, instance, surface);
+    try reportPresentation(out, gpa, resolver, cmds, instance, surface);
 
     try out.flush();
 }
@@ -163,34 +115,26 @@ pub fn main(init: std.process.Init) !void {
 /// to this window" is not.
 fn reportPresentation(
     out: *Io.Writer,
-    get_proc: GetInstanceProcAddr,
-    instance: usize,
+    gpa: std.mem.Allocator,
+    resolver: vk.Resolver,
+    cmds: vk.InstanceCommands,
+    instance: vk.Instance,
     surface: u64,
 ) !void {
-    const enumerate: *const fn (usize, *u32, ?[*]usize) callconv(.c) i32 =
-        @ptrCast(get_proc(instance, "vkEnumeratePhysicalDevices") orelse return);
-    const queue_props: *const fn (usize, *u32, ?*anyopaque) callconv(.c) void =
-        @ptrCast(get_proc(instance, "vkGetPhysicalDeviceQueueFamilyProperties") orelse return);
-    const supports: *const fn (usize, u32, u64, *u32) callconv(.c) i32 =
-        @ptrCast(get_proc(instance, "vkGetPhysicalDeviceSurfaceSupportKHR") orelse return);
+    const SurfaceSupport = *const fn (vk.PhysicalDevice, u32, u64, *u32) callconv(vk.call) vk.Result;
+    const supports: SurfaceSupport = @ptrCast(resolver.lookup("vkGetPhysicalDeviceSurfaceSupportKHR") orelse return);
 
-    var device_count: u32 = 0;
-    if (enumerate(instance, &device_count, null) != 0 or device_count == 0) {
+    const devices = try vk.enumerate.physicalDevices(gpa, cmds, instance);
+    if (devices.len == 0) {
         try out.writeAll("no physical device to ask\n");
         return;
     }
 
-    var devices: [8]usize = undefined;
-    device_count = @min(device_count, devices.len);
-    if (enumerate(instance, &device_count, &devices) != 0) return;
-
-    var families: u32 = 0;
-    queue_props(devices[0], &families, null);
-
-    var family: u32 = 0;
-    while (family < families) : (family += 1) {
+    const families = try vk.enumerate.queueFamilies(gpa, cmds, devices[0]);
+    for (families, 0..) |_, index| {
+        const family: u32 = @intCast(index);
         var ok: u32 = 0;
-        if (supports(devices[0], family, surface, &ok) != 0) continue;
+        _ = supports(devices[0], family, surface, &ok).check() catch continue;
         if (ok != 0) {
             try out.print("queue family {d} can present to it\n", .{family});
             return;

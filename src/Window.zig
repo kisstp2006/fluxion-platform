@@ -311,6 +311,25 @@ pub fn getProcAddress(self: Window, name: [*:0]const u8) ?gl.Proc {
     return self.ctx.vtable.getProcAddress(self.ctx.impl, e.native, name);
 }
 
+/// `getProcAddress` under the name `fluxion-dyn` looks for.
+///
+/// A `dyn` resolver is a `getProcAddress` function or a value with a public
+/// `get` method, and every table loader built on it - `fluxion-gl` first among
+/// them - takes one of those. So a window with a context is itself the thing
+/// to hand `load`, with nothing in between:
+///
+/// ```zig
+/// var api: opengl.Gl = undefined;
+/// try api.load(win);
+/// ```
+///
+/// The window already looks in both places a command can be - the context's
+/// extension mechanism and the GL library's own exports - so no `Chain` is
+/// needed around it.
+pub fn get(self: Window, name: [*:0]const u8) ?gl.Proc {
+    return self.getProcAddress(name);
+}
+
 /// What the context actually is, which is not always what was asked for: a
 /// driver may hand back a newer version, or fewer samples than requested.
 ///
@@ -503,4 +522,20 @@ test "a handle is small enough to copy without thinking about it" {
     // the pointer's alignment.
     try testing.expect(@sizeOf(Window) <= 2 * @sizeOf(*Context));
     try testing.expect(@sizeOf(Window) >= @sizeOf(*Context) + @sizeOf(event.WindowId));
+}
+
+test "a window is a resolver fluxion-dyn accepts" {
+    // The contract is duck-typed - a public `get(name) ?Proc` - and this is
+    // where it is checked, so that a loader built on `fluxion-dyn` can take
+    // the window itself rather than a wrapper somebody had to write.
+    const dyn = @import("fluxion_dyn");
+    try testing.expect(dyn.resolver.isResolver(Window));
+    try testing.expect(dyn.resolver.isResolver(*const Window));
+
+    // And on a backend with no display, asking answers null rather than
+    // crashing - the same answer as for a name the driver has never heard of.
+    var ctx = try Context.init(testing.allocator, .{ .select = .{ .only = .none } });
+    defer ctx.deinit();
+    const stale: Window = .{ .ctx = &ctx, .id = @enumFromInt(7) };
+    try testing.expectEqual(@as(?gl.Proc, null), stale.get("glClear"));
 }
