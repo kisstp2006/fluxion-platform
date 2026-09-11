@@ -175,6 +175,8 @@ test {
     _ = @import("backend/none.zig");
     // The key table has no platform in it, so it is checked on every host.
     _ = @import("backend/evdev.zig");
+    // Nor has the rule every backend works the virtual key out with.
+    _ = @import("backend/virtual_key.zig");
 
     const os = @import("builtin").os.tag;
     if (os == .windows) {

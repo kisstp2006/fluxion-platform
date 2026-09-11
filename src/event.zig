@@ -16,11 +16,12 @@
 //! ```
 //!
 //! **`.key` and `.char` are not the same event.** A key event is a physical key
-//! going down or up, in the position it occupies whatever the layout says. A
-//! char event is a codepoint the user meant to type, already through the
-//! layout, the dead keys and any input method - one keypress can produce no
-//! chars, one char, or several. Bind controls to `.key`; put text in a box with
-//! `.char`.
+//! going down or up, in the position it occupies whatever the layout says, and
+//! the virtual key the layout names it beside it. A char event is a codepoint
+//! the user meant to type, already through the layout, the dead keys and any
+//! input method - one keypress can produce no chars, one char, or several. Bind
+//! controls to `key`, compare shortcuts against `virtual`, and put text in a box
+//! with `.char`.
 //!
 //! **`.surface_lost` and `.surface_created` are the Android ones**, and the
 //! reason this library does not pretend a window is a thing you own for as long
@@ -47,9 +48,30 @@ pub const WindowId = enum(u32) {
 };
 
 /// A key going down, coming up, or repeating.
+///
+/// **Two names for one key: the physical and the virtual.** `key` is where
+/// it is, whatever the layout says - what WASD is bound to, so that it does
+/// not move under somebody on AZERTY. `virtual` is what the layout calls it -
+/// what a shortcut is written against, because ctrl+Z means the Z the user
+/// can see, and on a German or Hungarian keyboard that is the key `key` calls
+/// `.y`.
 pub const KeyEvent = struct {
     window: WindowId,
+    /// The physical key, at its position on a US layout.
     key: keys.Key,
+    /// The virtual key: the key as the layout in use names it.
+    ///
+    /// Only letters move. A key that types a Latin letter is that letter,
+    /// wherever the layout put it. A letter from another alphabet is the
+    /// Latin letter of its place, the way every system does it for shortcuts,
+    /// so ctrl+C still copies on a Cyrillic or a Greek keyboard. A letter's
+    /// place that holds something else - AZERTY's comma, where US has M - is
+    /// `.unknown`, so that no two keys claim one letter. Digits, punctuation
+    /// and the keys that type nothing are the same as `key`.
+    ///
+    /// Every backend fills this in. An event made by hand - a test's, a
+    /// replay's - that leaves it out gets `.unknown`.
+    virtual: keys.Key = .unknown,
     /// The platform's own number for the same key. Use it to tell two keys
     /// apart that both arrive as `unknown`.
     scancode: keys.Scancode,

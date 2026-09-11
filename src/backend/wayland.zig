@@ -51,6 +51,7 @@ const xkb = @import("xkb.zig");
 const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
 const evdev = @import("evdev.zig");
+const virtual_key = @import("virtual_key.zig");
 const cursor_mod = @import("../cursor.zig");
 
 const Error = platform.Error;
@@ -1874,9 +1875,13 @@ fn onKey(
     const native = self.keyboard_focus orelse return;
 
     // The kernel's own code, with no offset - unlike X11, which adds eight.
+    // What the layout calls the key is libxkbcommon's to say as well; without
+    // it the virtual key is the physical one.
+    const physical = evdev.keyFromEvdev(key);
     push(self, .{ .key = .{
         .window = native.id,
-        .key = evdev.keyFromEvdev(key),
+        .key = physical,
+        .virtual = virtual_key.fromTyped(physical, virtual_key.typedByKeysym(self.xkb.baseSym(key))),
         .scancode = @enumFromInt(key),
         .action = if (state == state_released) .release else .press,
         .mods = self.mods,

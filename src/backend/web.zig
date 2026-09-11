@@ -69,6 +69,7 @@ const text_mod = @import("../text.zig");
 const vulkan = @import("../vulkan.zig");
 const web_gamepad = @import("web_gamepad.zig");
 const web_keys = @import("web_keys.zig");
+const virtual_key = @import("virtual_key.zig");
 pub const wire = @import("web_wire.zig");
 
 /// The page that is not there, for building and testing anywhere else. Always
@@ -756,9 +757,12 @@ fn translate(self: *Impl, record: *const wire.Record) void {
         .key => {
             const action = actionFrom(record.a) orelse return;
             const found = web_keys.fromCode(text);
+            // `c` is what the key types on its own, as far as the glue could
+            // tell, and the virtual key is worked out from it.
             push(self, .{ .key = .{
                 .window = id,
                 .key = found.key,
+                .virtual = virtual_key.fromTyped(found.key, charFrom(record.c)),
                 .scancode = found.scancode,
                 .action = action,
                 .mods = modsFrom(record.b),
@@ -1129,6 +1133,41 @@ test "a key arrives at its position, with its usage as the scancode" {
 
             try testing.expectEqual(keys.Action.repeat, queue.next().?.key.action);
             try testing.expectEqual(keys.Action.release, queue.next().?.key.action);
+            try testing.expectEqual(@as(?event.Event, null), queue.next());
+        }
+    }.run);
+}
+
+test "a key's virtual key is the letter the layout puts on it" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            _ = native;
+            // A Hungarian keyboard's Z, where US has Y, with control held.
+            stub.queue(.{ .kind = .key, .window = 1, .a = 1, .b = 0b10, .c = 'z' }, "KeyY");
+            // A Russian keyboard's я, where US has Z.
+            stub.queue(.{ .kind = .key, .window = 1, .a = 1, .c = 0x44F }, "KeyZ");
+            // AZERTY's comma, where US has M.
+            stub.queue(.{ .kind = .key, .window = 1, .a = 1, .c = ',' }, "KeyM");
+            // A key whose character the glue could not tell, and one that
+            // types nothing.
+            stub.queue(.{ .kind = .key, .window = 1, .a = 1 }, "KeyQ");
+            stub.queue(.{ .kind = .key, .window = 1, .a = 1 }, "Enter");
+            try vtable.pump(impl, queue);
+
+            const z = queue.next().?.key;
+            try testing.expectEqual(keys.Key.y, z.key);
+            try testing.expectEqual(keys.Key.z, z.virtual);
+
+            const ya = queue.next().?.key;
+            try testing.expectEqual(keys.Key.z, ya.key);
+            try testing.expectEqual(keys.Key.z, ya.virtual);
+
+            const comma = queue.next().?.key;
+            try testing.expectEqual(keys.Key.m, comma.key);
+            try testing.expectEqual(keys.Key.unknown, comma.virtual);
+
+            try testing.expectEqual(keys.Key.q, queue.next().?.key.virtual);
+            try testing.expectEqual(keys.Key.enter, queue.next().?.key.virtual);
             try testing.expectEqual(@as(?event.Event, null), queue.next());
         }
     }.run);

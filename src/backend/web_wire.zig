@@ -25,7 +25,9 @@ pub const Kind = enum(u32) {
     none = 0,
     /// A key went down, came up or repeated. `a` is the action - 0 release,
     /// 1 press, 2 repeat - `b` the modifier bits, and the text is the DOM
-    /// `code`: where the key is, not what it types.
+    /// `code`: where the key is, not what it types. `c` is what it types on
+    /// its own on the layout in use, as a codepoint, or 0 where the glue could
+    /// not tell - the virtual key is worked out from it.
     key = 1,
     /// A codepoint was typed. `a` is the codepoint, `b` the modifier bits.
     char = 2,

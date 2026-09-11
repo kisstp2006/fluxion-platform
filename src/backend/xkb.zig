@@ -68,6 +68,11 @@ const Xkb = struct {
     /// The text one key produces, in UTF-8, given everything held down.
     xkb_state_key_get_utf8: *const fn (*State, u32, [*]u8, usize) callconv(.c) c_int,
     xkb_state_key_get_one_sym: *const fn (*State, u32) callconv(.c) u32,
+    /// What a key is on its first level, in the layout in use: the virtual
+    /// key's question, which the two above answer only with everything held
+    /// down applied. Optional, and `baseSym` falls back to the one above.
+    xkb_state_key_get_layout: ?*const fn (*State, u32) callconv(.c) u32 = null,
+    xkb_keymap_key_get_syms_by_level: ?*const fn (*Keymap, u32, u32, u32, *?[*]const u32) callconv(.c) c_int = null,
 
     /// Compose. Optional as a group: a locale with no compose file has none,
     /// and then a dead key is simply a key that types nothing.
@@ -272,6 +277,33 @@ pub const Backend = struct {
         if (n <= 0) return .{};
         return .{ .text = self.buf[0..@intCast(@min(n, self.buf.len - 1))] };
     }
+
+    /// The keysym on a key's first level in the layout in use: what it types
+    /// on its own, before shift, caps lock or AltGr choose another. The
+    /// virtual key is worked out from it. Zero where there is no keymap yet,
+    /// or nothing on the key.
+    ///
+    /// `code` is the raw evdev code, as for `keyText`.
+    pub fn baseSym(self: *Backend, code: u32) u32 {
+        const x = self.x orelse return 0;
+        const state = self.state orelse return 0;
+        const keymap = self.keymap orelse return 0;
+        const keycode = code + 8;
+
+        // A library too old for the two calls answers with the current
+        // level, which is right for everything but a letter under AltGr.
+        const get_layout = x.xkb_state_key_get_layout orelse return x.xkb_state_key_get_one_sym(state, keycode);
+        const by_level = x.xkb_keymap_key_get_syms_by_level orelse return x.xkb_state_key_get_one_sym(state, keycode);
+
+        const layout = get_layout(state, keycode);
+        // `XKB_LAYOUT_INVALID`: a key the keymap does not have.
+        if (layout == 0xFFFF_FFFF) return 0;
+        var syms: ?[*]const u32 = null;
+        const n = by_level(keymap, keycode, layout, 0, &syms);
+        if (n <= 0) return 0;
+        const list = syms orelse return 0;
+        return list[0];
+    }
 };
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
@@ -363,6 +395,30 @@ test "a real keymap turns a keycode into the text it types" {
     // A key the keymap has nothing on types nothing, rather than a stray byte
     // left over from the last lookup.
     try testing.expectEqualStrings("", backend.keyText(200).text);
+}
+
+test "a key's first level is what it types on its own, with shift held or not" {
+    var backend: Backend = Backend.open();
+    defer backend.close();
+    if (!backend.available()) return error.SkipZigTest;
+
+    backend.setKeymap(tiny_keymap);
+    if (!backend.ready()) return error.SkipZigTest;
+
+    // XK_q either way: shift chooses the second level, and the virtual key
+    // asks about the first.
+    try testing.expectEqual(@as(u32, 'q'), backend.baseSym(16));
+    backend.updateMods(1, 0, 0, 0);
+    try testing.expectEqual(@as(u32, 'q'), backend.baseSym(16));
+    try testing.expectEqualStrings("Q", backend.keyText(16).text);
+
+    // Nothing on the key is nothing.
+    try testing.expectEqual(@as(u32, 0), backend.baseSym(200));
+}
+
+test "a backend with no keymap has no first level to report" {
+    var backend: Backend = .{};
+    try testing.expectEqual(@as(u32, 0), backend.baseSym(16));
 }
 
 test "a keymap that will not compile leaves the last one working" {

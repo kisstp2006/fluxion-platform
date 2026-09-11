@@ -38,6 +38,7 @@ const vulkan = @import("../vulkan.zig");
 const text_mod = @import("../text.zig");
 const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
+const virtual_key = @import("virtual_key.zig");
 
 const Error = platform.Error;
 
@@ -361,6 +362,9 @@ const vk_lwin: i32 = 0x5B;
 const vk_rwin: i32 = 0x5C;
 const vk_capital: i32 = 0x14;
 const vk_numlock: i32 = 0x90;
+/// What every key arrives as while an input method is working on it: the
+/// method has the key, and which one it was is not this message's to say.
+const vk_processkey: WPARAM = 0xE5;
 
 /// `MAPVK_VK_TO_VSC`, which is the direction this needs: a virtual key back to
 /// the position it would have come from.
@@ -1820,10 +1824,12 @@ fn handle(
                 .press;
 
             const scancode = scancodeFrom(self, wparam, lparam);
+            const physical = keyFromScancode(scancode);
 
             push(self, .{ .key = .{
                 .window = id,
-                .key = keyFromScancode(scancode),
+                .key = physical,
+                .virtual = virtualFrom(physical, wparam),
                 .scancode = @enumFromInt(scancode),
                 .action = action,
                 .mods = readMods(self),
@@ -2094,6 +2100,19 @@ fn scancodeFrom(self: *Impl, wparam: WPARAM, lparam: LPARAM) u32 {
     return if (extended) mapped | 0x100 else mapped;
 }
 
+/// `KeyEvent.virtual`, from the virtual key Windows sent with the message.
+///
+/// Windows has worked this out already. A layout gives each letter key the
+/// virtual key of the letter printed on it - `VK_Z` for the key marked Z,
+/// wherever that is - and a layout whose letters are not Latin gives them the
+/// Latin letter of their place, which is the rule `virtual_key` writes down
+/// for every backend. A key the layout gives no letter is anything but one.
+fn virtualFrom(physical: keys.Key, vk: WPARAM) keys.Key {
+    if (vk == vk_processkey) return physical;
+    const letter: ?u8 = if (vk >= 'A' and vk <= 'Z') @intCast(vk) else null;
+    return virtual_key.fromLetter(physical, letter);
+}
+
 /// One `WM_CHAR` into a codepoint, or null where there is no text in it.
 ///
 /// Two reasons for null. A high surrogate is half a character and has to wait
@@ -2328,6 +2347,22 @@ test "a scancode with no name is unknown, not a wrong key" {
     try testing.expectEqual(keys.Key.unknown, keyFromScancode(0x00));
     try testing.expectEqual(keys.Key.unknown, keyFromScancode(0xFE));
     try testing.expectEqual(keys.Key.unknown, keyFromScancode(0x1FF));
+}
+
+test "the virtual key is the letter the layout gave the key" {
+    // Hungarian and German: the key where US has Y sends VK_Z, and the other
+    // way round.
+    try testing.expectEqual(keys.Key.z, virtualFrom(keyFromScancode(0x15), 'Z'));
+    try testing.expectEqual(keys.Key.y, virtualFrom(keyFromScancode(0x2C), 'Y'));
+    // Russian sends VK_Z from the place US has Z, which is where it stays.
+    try testing.expectEqual(keys.Key.z, virtualFrom(.z, 'Z'));
+    // AZERTY's comma, where US has M, is VK_OEM_COMMA and claims no letter.
+    try testing.expectEqual(keys.Key.unknown, virtualFrom(.m, 0xBC));
+    // Digits and the keys that type nothing keep their names.
+    try testing.expectEqual(keys.Key.@"1", virtualFrom(.@"1", '1'));
+    try testing.expectEqual(keys.Key.left, virtualFrom(.left, 0x25));
+    // While an input method has the keys, which one it was is not known.
+    try testing.expectEqual(keys.Key.q, virtualFrom(.q, vk_processkey));
 }
 
 test "a surrogate pair becomes one codepoint" {

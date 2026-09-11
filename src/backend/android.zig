@@ -49,6 +49,7 @@ const gl = @import("../gl.zig");
 const vulkan = @import("../vulkan.zig");
 const text_mod = @import("../text.zig");
 const android_text = @import("android_text.zig");
+const virtual_key = @import("virtual_key.zig");
 const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
 const cursor_mod = @import("../cursor.zig");
@@ -883,14 +884,28 @@ fn readDensity(self: *Impl) ?f32 {
 /// program that never reads text never crosses into Java at all. A failure
 /// anywhere leaves `ready` false and this quietly produces nothing, which is
 /// the same as a key that types nothing.
+/// Attach to the VM for `getUnicodeChar`, the first time anything asks.
+/// False where there is no activity or no VM to ask.
+fn ensureText(self: *Impl) bool {
+    if (self.text.ready()) return true;
+    const activity = glue.activity orelse return false;
+    // `activity.vm` is already C's `JavaVM*` - a pointer to a pointer to the
+    // table - so this is a cast and not a dereference.
+    const vm: android_text.JavaVm = @ptrCast(@alignCast(activity.vm orelse return false));
+    return self.text.open(vm);
+}
+
+/// What a key types on its own: `getUnicodeChar` with no meta state, which is
+/// its first level on the device's layout. The virtual key is worked out from
+/// it. Null where the VM cannot be asked, or the key types nothing.
+fn baseChar(self: *Impl, action: i32, code: i32) ?u21 {
+    if (!ensureText(self)) return null;
+    const codepoint = self.text.unicodeChar(action, code, 0);
+    return if (codepoint == 0) null else codepoint;
+}
+
 fn pushChar(self: *Impl, id: event.WindowId, action: i32, code: i32, meta: i32) void {
-    if (!self.text.ready()) {
-        const activity = glue.activity orelse return;
-        // `activity.vm` is already C's `JavaVM*` - a pointer to a pointer to
-        // the table - so this is a cast and not a dereference.
-        const vm: android_text.JavaVm = @ptrCast(@alignCast(activity.vm orelse return));
-        if (!self.text.open(vm)) return;
-    }
+    if (!ensureText(self)) return;
 
     const codepoint = self.text.unicodeChar(action, code, meta);
     // Zero is "types nothing", which is most keys: the arrows, the volume
@@ -1338,9 +1353,11 @@ fn translate(self: *Impl, input_event: *AInputEvent, id: event.WindowId) bool {
 
             const code = a.AKeyEvent_getKeyCode(input_event);
             const meta = a.AKeyEvent_getMetaState(input_event);
+            const physical = keyFromAndroid(code);
             push(self, .{ .key = .{
                 .window = id,
-                .key = keyFromAndroid(code),
+                .key = physical,
+                .virtual = virtual_key.fromTyped(physical, baseChar(self, action, code)),
                 .scancode = @enumFromInt(@as(u32, @bitCast(a.AKeyEvent_getScanCode(input_event)))),
                 .action = if (action == key_action_down) .press else .release,
                 .mods = modsFromMeta(meta),

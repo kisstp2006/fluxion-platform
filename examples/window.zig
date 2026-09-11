@@ -94,8 +94,8 @@ pub fn main(init: std.process.Init) !void {
             },
 
             .key => |k| {
-                try out.print("key    {f} {t} [{f}] scancode {f}\n", .{
-                    k.key, k.action, k.mods, k.scancode,
+                try out.print("key    {f} {t} [{f}] virtual {f} scancode {f}\n", .{
+                    k.key, k.action, k.mods, k.virtual, k.scancode,
                 });
                 if (k.key == .escape and k.action == .press) win.setShouldClose(true);
                 if (k.action == .press) fullscreenKey(&ctx, win, k.key, out) catch |err| {

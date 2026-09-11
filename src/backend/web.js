@@ -383,6 +383,20 @@ export class Platform {
     this.encoder = new TextEncoder();
     this.cachedU8 = null;
     this.cachedView = null;
+
+    // What each key types on its own, by position, as far as it is known -
+    // see `labelOf`. The browser's own map of the layout where it has one,
+    // which knows every key before any has been pressed; otherwise learnt a
+    // key at a time, from the keys pressed with nothing held.
+    this.labels = new Map();
+    if (typeof navigator !== "undefined" && navigator.keyboard?.getLayoutMap) {
+      navigator.keyboard
+        .getLayoutMap()
+        .then((map) => {
+          for (const [code, key] of map) if (!this.labels.has(code)) this.labels.set(code, key);
+        })
+        .catch(() => {});
+    }
   }
 
   // -- reading and writing the module's memory --
@@ -1312,7 +1326,8 @@ export class Platform {
     const composing = event.isComposing || event.keyCode === 229;
     const position = positionOf(event);
     if (position && !composing) {
-      this.queue({ kind: KIND.key, win: win.id, a: event.repeat ? 2 : 1, b: win.lastMods, text: position });
+      const c = this.labelOf(event, position);
+      this.queue({ kind: KIND.key, win: win.id, a: event.repeat ? 2 : 1, b: win.lastMods, c, text: position });
       win.down.add(position);
       if (position === "Backspace") win.sawDelete = true;
       if (position === "Enter" || position === "NumpadEnter") win.sawEnter = true;
@@ -1338,18 +1353,45 @@ export class Platform {
     win.lastMods = modsOf(event);
     const position = positionOf(event);
     if (position && !(event.isComposing || event.keyCode === 229)) {
-      this.queue({ kind: KIND.key, win: win.id, a: 0, b: win.lastMods, text: position });
+      const c = this.labelOf(event, position);
+      this.queue({ kind: KIND.key, win: win.id, a: 0, b: win.lastMods, c, text: position });
       win.down.delete(position);
     }
     if (APPLE && /^(Meta|OS)(Left|Right)$/.test(position)) {
       for (const held of win.down) {
-        this.queue({ kind: KIND.key, win: win.id, a: 0, b: win.lastMods, text: held });
+        const c = this.labels.get(held)?.codePointAt(0) ?? 0;
+        this.queue({ kind: KIND.key, win: win.id, a: 0, b: win.lastMods, c, text: held });
       }
       win.down.clear();
     }
     if (!(win.textInput && fromField) && !event.ctrlKey && !event.metaKey && !BROWSER_KEYS.has(event.code)) {
       event.preventDefault();
     }
+  }
+
+  /// What a key types on its own on the layout in use, as a code point, or 0
+  /// where that cannot be told. `KeyEvent.virtual` is worked out from it, on
+  /// the Zig side, by the rule every backend shares.
+  ///
+  /// `key` says exactly that for a key pressed with nothing held, and it is
+  /// remembered for the position. With something held it may not: shift
+  /// makes a letter a capital, which is still the letter, but AltGr and alt
+  /// choose another character altogether. So a chord is answered from what
+  /// the same key typed on its own - remembered, or from the browser's map
+  /// of the layout - and failing that a letter held with shift or control is
+  /// taken as it comes.
+  labelOf(event, position) {
+    const key = event.key ?? "";
+    const one = [...key].length === 1;
+    const altGraph = event.getModifierState?.("AltGraph") ?? false;
+    if (one && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !altGraph) {
+      this.labels.set(position, key);
+      return key.codePointAt(0);
+    }
+    const known = this.labels.get(position);
+    if (known) return known.codePointAt(0);
+    if (one && !event.altKey && !altGraph) return key.toLowerCase().codePointAt(0);
+    return 0;
   }
 
   /// Everything the browser would only grant a person who had just done

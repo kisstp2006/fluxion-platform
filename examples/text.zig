@@ -3,14 +3,15 @@
 //! A window that takes typing, and prints what it got.
 //!
 //! The difference between a key and a letter, made visible. Every keystroke
-//! prints twice: once as the key that moved, at its position on the keyboard,
-//! and once as the text it produced after the layout, the dead keys and the
-//! input method have all had their say.
+//! prints twice: once as the key that moved - at its position on the keyboard,
+//! and as the key the layout names it - and once as the text it produced after
+//! the layout, the dead keys and the input method have all had their say.
 //!
 //! Worth trying, in order:
 //!
 //! - a letter, which prints the same both ways on a US layout and differently
-//!   on any other;
+//!   on any other - on a German or Hungarian keyboard, Z is the key at `y`,
+//!   and its virtual key is `z`;
 //! - shift and a number, which prints one key and a symbol that depends on the
 //!   layout;
 //! - a dead key - `'` then `e` on a US-international layout, or compose then
@@ -74,8 +75,10 @@ pub fn main(init: std.process.Init) !void {
                 if (k.key == .escape) win.setShouldClose(true);
                 // The position on the keyboard. `.a` is where `A` is on a US
                 // layout and where `Q` is on a French one - which is exactly
-                // why a text field must not read this.
-                try out.print("key   {f}\n", .{k.key});
+                // why a text field must not read this. And the virtual key,
+                // the name the layout gives it, which is what a shortcut
+                // compares against.
+                try out.print("key   {f}, virtual {f}\n", .{ k.key, k.virtual });
             },
 
             .char => |ch| {

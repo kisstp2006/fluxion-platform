@@ -126,7 +126,7 @@ export fn deinit() void {
 fn handle(ev: platform.Event) void {
     switch (ev) {
         .key => |k| {
-            std.log.info("key      {f} {t} [{f}] {f}", .{ k.key, k.action, k.mods, k.scancode });
+            std.log.info("key      {f} {t} [{f}] virtual {f} {f}", .{ k.key, k.action, k.mods, k.virtual, k.scancode });
             // A key with a modifier held is somebody typing - AltGr and M is
             // `<` on a Hungarian keyboard - and not a command. AltGr is right
             // alt, which a browser does not count as a modifier at all.

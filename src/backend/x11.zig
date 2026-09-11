@@ -33,6 +33,7 @@ const monitor = @import("../monitor.zig");
 const gamepad = @import("../gamepad.zig");
 const linux_gamepad = @import("linux_gamepad.zig");
 const glx = @import("glx.zig");
+const virtual_key = @import("virtual_key.zig");
 const gl = @import("../gl.zig");
 const vulkan = @import("../vulkan.zig");
 const text_mod = @import("../text.zig");
@@ -2133,9 +2134,11 @@ fn translate(self: *Impl, ev: *XEvent, queue: *backend.Queue) Error!void {
 
         key_press, key_release => {
             const down = ev.type == key_press;
+            const physical = keyFromKeycode(ev.xkey.keycode);
             try queue.push(.{ .key = .{
                 .window = id,
-                .key = keyFromKeycode(ev.xkey.keycode),
+                .key = physical,
+                .virtual = virtual_key.fromTyped(physical, virtual_key.typedByKeysym(baseKeysym(self, &ev.xkey))),
                 .scancode = @enumFromInt(ev.xkey.keycode),
                 .action = if (down) .press else .release,
                 .mods = modsFromState(ev.xkey.state),
@@ -2245,6 +2248,23 @@ fn createIc(self: *Impl, window: Window) ?*XIC {
         window,
         @as(?*anyopaque, null),
     );
+}
+
+/// The keysym on a key's first level in the layout group in use: what it types
+/// on its own, before shift, caps lock or AltGr choose another. The virtual
+/// key is worked out from it.
+///
+/// `XLookupString` on a copy of the event with every modifier cleared but the
+/// group, which is bits 13 and 14 and says which layout is in use. Passing no
+/// compose status keeps it stateless, so it cannot disturb the lookup that
+/// produces the text.
+fn baseKeysym(self: *Impl, key_event: *const XKeyEvent) u32 {
+    var plain = key_event.*;
+    plain.state &= 0x6000;
+    var sym: KeySym = 0;
+    var buf: [8]u8 = undefined;
+    _ = self.x.XLookupString(&plain, &buf, buf.len, &sym, null);
+    return std.math.cast(u32, sym) orelse 0;
 }
 
 /// The text a keypress produced, as `.char` events.

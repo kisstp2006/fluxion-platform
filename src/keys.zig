@@ -7,6 +7,10 @@
 //! is what WASD wants; the letter the user actually typed arrives separately, as
 //! a `.char` event, already through the layout and any dead keys.
 //!
+//! The same names serve the virtual key a key event carries beside the
+//! physical one: `KeyEvent.virtual` is `.z` for the key the layout in use has
+//! put Z on, wherever that is, which is what a shortcut wants.
+//!
 //! The numbers match GLFW's, so a port is a change of spelling. `Key` is
 //! non-exhaustive: a key this library has no name for keeps its value rather
 //! than being flattened to one `unknown`, and `Key.named` says which it was.

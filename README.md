@@ -348,6 +348,37 @@ keystroke with no scancode at all - which is what an on-screen keyboard, a
 remote desktop, a screen reader and an automation tool all send on Windows - is
 turned back into a position rather than reported as unknown.
 
+**A shortcut wants the other name.** Ctrl+Z means the Z the user can see, and
+on a German or Hungarian keyboard that is the key `Key.y` names. So a key event
+carries two, and only two: `key`, the physical key, and `virtual`, the key as
+the layout in use names it.
+
+```zig
+.key => |k| {
+    if (k.key == .w) camera.forward();                         // a position
+    if (k.mods.control and k.virtual == .z) history.undo();    // a letter
+},
+```
+
+On Windows, AltGr arrives as control and alt together, and types characters -
+`@` on a Hungarian keyboard is AltGr and V - so a program that reads control as
+a command wants alt not held as well.
+
+Only letters move. A key that types a Latin letter is that letter, wherever the
+layout put it; a letter from another alphabet is the Latin letter of its place,
+the way every system does it for shortcuts, so ctrl+C still copies on a
+Cyrillic or a Greek keyboard; and a letter's place that holds something else -
+AZERTY's comma, where US has M - is `unknown`, so that no two keys claim one
+letter. Digits and punctuation stay where they are, because on AZERTY and on a
+Czech keyboard the digits are the shifted half of their keys.
+
+Each system is asked the same question - what does this key type on its own,
+before shift or AltGr choose another character - and answers it its own way:
+Windows with its virtual key, a browser with `KeyboardEvent.key` and its layout
+map, X11 and Wayland with the keysym on the key's first level, Android with
+`getUnicodeChar`. One rule, in `backend/virtual_key.zig`, turns the answer into
+`virtual` everywhere.
+
 ## Android is not a small desktop
 
 GLFW does not support Android, and the reason is not effort: the model is
