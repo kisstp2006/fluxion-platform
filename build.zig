@@ -290,8 +290,10 @@ fn addWebExamples(b: *std.Build, web: WebExamples) void {
         .install_subdir = "web",
     }).step);
     step.dependOn(&b.addInstallFile(web.glue, "web/fluxion-platform.js").step);
+    // Asked for by the name fluxion-webgl gives it, not by where that
+    // repository keeps it: the file has moved once already.
     step.dependOn(&b.addInstallFile(
-        web.webgl.path("examples/web/fluxion-webgl.js"),
+        web.webgl.namedLazyPath("glue"),
         "web/fluxion-webgl.js",
     ).step);
 

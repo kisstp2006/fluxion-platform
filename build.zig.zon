@@ -8,7 +8,7 @@
     .dependencies = .{
         // The library's one dependency.
         .fluxion_dyn = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-dyn#27e7ba0dffff86887801afc7d312bfcdaff1c54f",
+            .url = "git+https://github.com/kisstp2006/fluxion-dyn#78c8c2a2ddcad8e90d3b45c0f80023f0b479f26b",
             .hash = "fluxion_dyn-0.1.0-5Dy8EU9PAQAp7cuNi6RU8eu0pgcFXWUbrBq69b7idVnA",
         },
 
@@ -18,8 +18,8 @@
         // loads nothing of it; a program that depends on `fluxion_platform`
         // never downloads this.
         .fluxion_vulkan = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-vulkan#4ee1fefeb14b5d64d3c305770ed0e9fea15eddce",
-            .hash = "fluxion_vulkan-0.1.0-8VC-cXi2BACsGRvxlmsdVwPAn1sLLUTCkh26YIJv5w_l",
+            .url = "git+https://github.com/kisstp2006/fluxion-vulkan#01ce1cc4a10b3c7eefdb3a001a7ceba019d6ff36",
+            .hash = "fluxion_vulkan-0.1.0-8VC-cXi2BADDE1qM8nvtspdPNcSUOZDo2e2ITKBcmSg3",
             .lazy = true,
         },
 
@@ -28,8 +28,8 @@
         // Vulkan binding above: the web backend makes a canvas and a WebGL
         // context on it, and neither loads nor declares a single WebGL call.
         .fluxion_webgl = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-webgl#cecc7397527166200af91e19f44f10a29568381f",
-            .hash = "fluxion_webgl-0.1.0-8yvbdaTcAgAt4pOTDmYXVdRfbQx0u9qJTMDLFUn9L3mk",
+            .url = "git+https://github.com/kisstp2006/fluxion-webgl#228b85f17702d28660e3fa6745ad7fcb3faa32ee",
+            .hash = "fluxion_webgl-0.1.0-8yvbdRdVAwDPfmGZBp5vku1-TRr6fCwl5ka84zXvguxU",
             .lazy = true,
         },
     },
