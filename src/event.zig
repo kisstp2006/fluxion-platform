@@ -90,6 +90,14 @@ pub const CursorEvent = struct {
 
 /// A wheel or a trackpad. `y` is the usual vertical wheel; `x` is the
 /// horizontal one, which most mice have not got.
+///
+/// Measured in notches - one click of a wheel is one, and a trackpad's glide
+/// is a fraction of one - and signed the same way on every backend: `y` is
+/// positive for up, the wheel rolled away from the user, and `x` is positive
+/// for right. The systems underneath do not agree - Wayland and the DOM count
+/// down as positive, Win32 and X11 count up - and each backend turns its own
+/// numbers round, so that a program has one convention to know rather than
+/// one per platform.
 pub const ScrollEvent = struct {
     window: WindowId,
     x: f64,

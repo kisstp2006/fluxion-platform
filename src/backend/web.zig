@@ -971,7 +971,7 @@ pub const delta_page = 2;
 /// settled on. A trackpad reports small pixel deltas and gets fractions of a
 /// notch, which is what it is.
 ///
-/// Horizontal is right-positive, as it is on Win32 and X11, and so is not
+/// Horizontal is right-positive, as it is on every backend, and so is not
 /// negated.
 pub fn wheelSteps(mode: i32, dx: f64, dy: f64) [2]f64 {
     const per_notch: f64 = switch (mode) {
@@ -1551,7 +1551,7 @@ test "a wheel's pixels, lines and pages are all notches" {
     try testing.expectEqual([2]f64{ 0, -1 }, wheelSteps(delta_pixel, 0, 100));
     try testing.expectEqual([2]f64{ 0, 1 }, wheelSteps(delta_line, 0, -3));
     try testing.expectEqual([2]f64{ 0, -80 }, wheelSteps(delta_page, 0, 1));
-    // Right is right, as on Win32 and X11.
+    // Right is right, as on every backend.
     try testing.expectEqual([2]f64{ 1, 0 }, wheelSteps(delta_pixel, 100, 0));
     // A trackpad's few pixels are a fraction of a notch, not a whole one.
     try testing.expectApproxEqAbs(@as(f64, -0.04), wheelSteps(delta_pixel, 0, 4)[1], 1e-9);

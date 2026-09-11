@@ -1756,16 +1756,34 @@ fn onPointerAxis(data: ?*anyopaque, proxy: *Proxy, time: u32, axis: u32, value: 
     const self: *Impl = @ptrCast(@alignCast(data.?));
     const native = self.pointer_focus orelse return;
 
-    // Wayland measures a scroll in surface units and counts down as positive,
-    // which is the opposite of every other backend here. One notch is fifteen
-    // units, which is what turns it back into the step a wheel means.
-    const amount = -fixedToDouble(value) / 15.0;
+    const amount = scrollFromAxis(axis, fixedToDouble(value)) orelse return;
     push(self, .{ .scroll = .{
         .window = native.id,
-        .x = if (axis == axis_horizontal) amount else 0,
-        .y = if (axis == axis_vertical) amount else 0,
+        .x = amount[0],
+        .y = amount[1],
         .mods = self.mods,
     } });
+}
+
+/// One `wl_pointer.axis` value as the notches `.scroll` counts, as `.{ x, y }`
+/// with right and up positive - which is what every other backend reports.
+///
+/// Wayland measures an axis in surface units, in the same space as pointer
+/// motion: x grows to the right and y grows downwards. So the horizontal axis
+/// already means what `.scroll` means, and only the vertical one is turned
+/// round. Negating both, as this once did, sent a sideways swipe the wrong way
+/// on this backend alone. One notch is fifteen units, which is what turns
+/// either back into the step a wheel means.
+///
+/// Null for an axis this backend has never heard of, which a later version of
+/// the protocol could add and which is not a scroll it knows how to report.
+fn scrollFromAxis(axis: u32, value: f64) ?[2]f64 {
+    const notches = value / 15.0;
+    return switch (axis) {
+        axis_horizontal => .{ notches, 0 },
+        axis_vertical => .{ 0, -notches },
+        else => null,
+    };
 }
 
 const KeyboardListener = extern struct {
@@ -2594,6 +2612,24 @@ test "fixed point is 24.8" {
     try testing.expectEqual(@as(f64, 0.5), fixedToDouble(128));
     try testing.expectEqual(@as(f64, -1), fixedToDouble(-256));
     try testing.expectEqual(@as(f64, 0), fixedToDouble(0));
+}
+
+test "a scroll is right and up positive, as on every other backend" {
+    // A notch to the right is already positive on the wire, like a pointer
+    // moving right, and stays so. This is the half that used to be flipped.
+    try testing.expectEqual([2]f64{ 1, 0 }, scrollFromAxis(axis_horizontal, 15).?);
+    try testing.expectEqual([2]f64{ -1, 0 }, scrollFromAxis(axis_horizontal, -15).?);
+
+    // A notch down is positive on the wire, like a pointer moving down, and
+    // `.scroll` counts up as positive - so this half is turned round.
+    try testing.expectEqual([2]f64{ 0, -1 }, scrollFromAxis(axis_vertical, 15).?);
+    try testing.expectEqual([2]f64{ 0, 1 }, scrollFromAxis(axis_vertical, -15).?);
+
+    // A trackpad's glide is a fraction of a notch, not a whole one.
+    try testing.expectApproxEqAbs(@as(f64, 0.2), scrollFromAxis(axis_horizontal, 3).?[0], 1e-9);
+
+    // And an axis the protocol does not have yet is not a scroll.
+    try testing.expectEqual(@as(?[2]f64, null), scrollFromAxis(2, 15));
 }
 
 test "the hand-written xdg descriptors match the protocol" {
