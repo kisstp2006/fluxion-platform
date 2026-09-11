@@ -152,6 +152,14 @@ const FIELD_KEYS = new Set([
   "PageDown",
 ]);
 
+/// The shortcuts that would select, undo or redo inside the hidden text field,
+/// by the letter the layout puts on the key - which is how the browser picks
+/// them. The program has its own selection and its own history, and hears
+/// these as keys. Run in the field as well, a select-all there takes in the
+/// field's one character, and the next letter typed over it is read as a
+/// backspace.
+const FIELD_SHORTCUTS = new Set(["a", "z", "y"]);
+
 /// What the hidden field holds when nothing is being typed. Never empty: a
 /// soft keyboard's backspace in an empty field deletes nothing, and some send
 /// no event at all for it. With a character there to delete there is always
@@ -196,6 +204,13 @@ function positionOf(event) {
   if (event.code && event.code !== "Unidentified") return event.code;
   if (NAMED_WITHOUT_CODE.has(event.key) || /^F\d{1,2}$/.test(event.key)) return event.key;
   return "";
+}
+
+/// Whether a key is one of `FIELD_SHORTCUTS`: control or command with the
+/// letter, and not AltGr, which Windows reports as control and alt together.
+function isFieldShortcut(event) {
+  const command = (event.ctrlKey || event.metaKey) && !event.getModifierState?.("AltGraph");
+  return command && FIELD_SHORTCUTS.has(event.key?.toLowerCase());
 }
 
 /// What a key typed, when the field is not in the way: `key`, if it is one
@@ -1306,8 +1321,8 @@ export class Platform {
     if (win.textInput && fromField) {
       // Typing belongs to the field now, and its text comes from its own
       // events. Only the keys that would move its caret or its focus are
-      // kept from it.
-      if (FIELD_KEYS.has(event.key)) event.preventDefault();
+      // kept from it, and the shortcuts that would select or undo in it.
+      if (FIELD_KEYS.has(event.key) || isFieldShortcut(event)) event.preventDefault();
       return;
     }
 
@@ -1444,6 +1459,11 @@ export class Platform {
 
   wheel(win, event) {
     event.preventDefault();
+    // Where the wheel turned, first. What scrolls is whatever is under the
+    // pointer, and the pointer need not have moved there since a move was
+    // last heard: a page that has not seen the mouse yet, or a wheel turned
+    // over the canvas the moment the page opened.
+    this.moved(win, event, true);
     // The mode first: Firefox reports lines only to a page that asks what it
     // is measuring in before it reads the deltas, and pixels otherwise.
     const mode = event.deltaMode;
