@@ -127,7 +127,11 @@ fn handle(ev: platform.Event) void {
     switch (ev) {
         .key => |k| {
             std.log.info("key      {f} {t} [{f}] {f}", .{ k.key, k.action, k.mods, k.scancode });
-            if (k.action == .press) command(k.key);
+            // A key with a modifier held is somebody typing - AltGr and M is
+            // `<` on a Hungarian keyboard - and not a command. AltGr is right
+            // alt, which a browser does not count as a modifier at all.
+            const chord = k.mods.control or k.mods.alt or k.mods.super or ctx.key(.right_alt);
+            if (k.action == .press and !chord) command(k.key);
         },
         .char => |ch| {
             var utf8: [4]u8 = undefined;

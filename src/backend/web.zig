@@ -772,10 +772,10 @@ fn translate(self: *Impl, record: *const wire.Record) void {
 
         .button => {
             const action = actionFrom(record.b) orelse return;
+            // A button does not repeat; a stray one is a press.
             push(self, .{ .mouse_button = .{
                 .window = id,
                 .button = buttonFrom(record.a),
-                // A button does not repeat; a stray one is a press.
                 .action = if (action == .repeat) .press else action,
                 .mods = modsFrom(record.c),
                 .x = record.x,
@@ -979,7 +979,10 @@ pub fn wheelSteps(mode: i32, dx: f64, dy: f64) [2]f64 {
         delta_page => 1.0 / 80.0,
         else => 100,
     };
-    return .{ dx / per_notch, -dy / per_notch };
+    // Adding zero turns a negative zero - what negating a still wheel gives -
+    // into a positive one, so that an axis that did not move prints as 0 and
+    // not as -0.
+    return .{ dx / per_notch + 0.0, -dy / per_notch + 0.0 };
 }
 
 // -------------------------------------------------------------------------
@@ -1552,4 +1555,7 @@ test "a wheel's pixels, lines and pages are all notches" {
     try testing.expectEqual([2]f64{ 1, 0 }, wheelSteps(delta_pixel, 100, 0));
     // A trackpad's few pixels are a fraction of a notch, not a whole one.
     try testing.expectApproxEqAbs(@as(f64, -0.04), wheelSteps(delta_pixel, 0, 4)[1], 1e-9);
+    // And an axis that did not move is zero, not negative zero.
+    try testing.expect(!std.math.signbit(wheelSteps(delta_pixel, 0, 0)[1]));
+    try testing.expect(!std.math.signbit(wheelSteps(delta_pixel, -0.0, 0)[0]));
 }

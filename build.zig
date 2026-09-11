@@ -96,9 +96,10 @@ pub fn build(b: *std.Build) void {
                 \\    const win = ctx.createWindow(.{}) catch return;
                 \\    defer win.destroy();
                 \\    ctx.pump() catch {};
-                \\    std.log.info("{d} dropped bytes", .{
-                \\        (platform.web.droppedFile(&ctx, 0, std.heap.wasm_allocator) catch &.{}).len,
-                \\    });
+                \\    if (platform.web.droppedFile(&ctx, 0, std.heap.wasm_allocator)) |bytes| {
+                \\        std.log.info("{d} dropped bytes", .{bytes.len});
+                \\        std.heap.wasm_allocator.free(bytes);
+                \\    } else |_| {}
                 \\}
             ),
             .target = wasm_target,

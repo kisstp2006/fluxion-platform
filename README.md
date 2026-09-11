@@ -16,6 +16,7 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `gl` | Asking a window for an OpenGL context, and driving the one it gives back. |
 | `vulkan` | Which instance extensions this session needs, and turning a window into a surface. |
 | `text` | The text a keyboard actually produces, and the input method between the two. |
+| `web` | What a browser build needs and `std` cannot give it: a console, a panic that says what it was, and the bytes of a dropped file. |
 | `backend` | What a windowing system has to answer to — the seam a new backend is written against. |
 
 The shape is GLFW's: window hints, key tokens at GLFW's own numbers, and
@@ -31,14 +32,18 @@ all.
 | `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text |
 | `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose |
 | `android` | Activity lifecycle, surface create and loss, focus, keys, touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text |
+| `web` | Canvas, both loop models, keyboard, text and composition, mouse, touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files |
 | `none` | Compiles and runs everywhere, makes no windows |
 
 On Linux `auto` opens Wayland where there is a compositor and falls through to
 X11 where there is not — the run-time selection the whole design exists for.
-The library still builds for Android, macOS and `wasm32`: `backend` is `.none`
-there and every call says so, rather than the build failing. That is what keeps
-a program that only wanted `Key` compiling on a target this library has never
-heard of.
+The library still builds for macOS and WASI: `backend` is `.none` there and
+every call says so, rather than the build failing. That is what keeps a program
+that only wanted `Key` compiling on a target this library has never heard of.
+
+`wasm32-freestanding` is the browser, and gets `web`. WASI does not, and that
+is deliberate: a WASI runtime is a command line with no page behind it, and a
+module that imported a canvas from one would not even instantiate.
 
 **Text input is the gap on both.** X11 goes through `XLookupString`, which
 answers in Latin-1: ASCII and the western European letters and nothing else.
@@ -77,12 +82,25 @@ One dependency comes with it, fetched the same way and needing nothing from
 you: [Fluxion Dyn](https://github.com/kisstp2006/fluxion-dyn), which is how
 every backend is opened.
 
-One more is named in `build.zig.zon` and is *not* fetched for you:
+Two more are named in `build.zig.zon` and are *not* fetched for you:
 [Fluxion Vulkan](https://github.com/kisstp2006/fluxion-vulkan), which the
-Vulkan example makes its instance with. It is `lazy`, and `build.zig` asks for
-it only when this is the package being built - a program that depends on
-`fluxion_platform` downloads nothing of Vulkan, and the library links nothing
-of it. Pass `-Dexamples=false` to skip it in a checkout of this repository too.
+Vulkan example makes its instance with, and
+[Fluxion WebGL](https://github.com/kisstp2006/fluxion-webgl), which the browser
+examples draw with. Both are `lazy`, and `build.zig` asks for them only when
+this is the package being built - a program that depends on `fluxion_platform`
+downloads nothing of either, and the library links nothing of them. Pass
+`-Dexamples=false` to skip them in a checkout of this repository too.
+
+A program built for the browser needs one file more, and it is JavaScript: the
+other half of the web backend, which the page loads beside the module. It is
+exported under a name, so there is no path into this package to spell:
+
+```zig
+b.getInstallStep().dependOn(&b.addInstallFile(
+    fluxion.namedLazyPath("fluxion-platform.js"),
+    "web/fluxion-platform.js",
+).step);
+```
 
 ## The short version
 
@@ -203,6 +221,7 @@ How far each platform goes differs, and it is worth knowing which:
 | `x11` | XIM and `Xutf8LookupString` | the input method draws its own |
 | `wayland` | libxkbcommon, with the locale's compose table | none yet — needs `zwp_text_input_v3` |
 | `android` | `KeyEvent.getUnicodeChar` over JNI | none — needs an `InputConnection` |
+| `web` | `KeyboardEvent.key`, or a hidden text field once text input is on | composition events, delivered as `.preedit` |
 
 Two of those are real gaps rather than platform limits, and they are written
 down rather than papered over. On X11 the composition is drawn by the input
@@ -351,6 +370,115 @@ correct on a phone and unchanged on a PC — and the reverse cannot happen
 quietly, which is the point of putting them in the union that every `switch`
 sees.
 
+## A browser owns the loop
+
+Built for `wasm32-freestanding`, a window is a `<canvas>` and the events come
+from the page, through `fluxion-platform.js` — the JavaScript half of the
+backend, one file with no dependencies. Everything above holds: the same
+queue, the same `Key` at the same positions, the same `.char` for what was
+typed. What does not hold is `while`.
+
+**A page cannot be blocked.** Nothing is drawn and no event is delivered until
+the module returns to the browser, so a loop that never returns is a frozen
+tab. There are two ways to live with that, and the glue picks by what the
+module exports:
+
+```zig
+// Everywhere, Safari included: the page calls these, once per animation frame.
+export fn init() bool { ... }
+export fn frame() bool {
+    ctx.pump() catch return false;
+    while (ctx.poll()) |ev| handle(ev);
+    draw();
+    return !win.shouldClose();
+}
+```
+
+The body of `frame` is the body of a desktop loop, `pump` included. Only the
+`while` moved into the browser — and the state moved to module scope, because
+there is no `main` to own it and a `Context` must not move once it has a
+window. It is the shape `fluxion-webgl` already has, and a page can drive
+both with one module.
+
+Or keep `main`, and its loop, exactly as it is on the desktop:
+
+```zig
+pub fn main() !void {
+    ...
+    while (!win.shouldClose()) {
+        try ctx.pump(); // the browser's turn - back at the next animation frame
+        ...
+    }
+}
+```
+
+Here `pump` is where the module is *suspended*, handing the browser its turn,
+and resumed at the next animation frame with whatever the page heard. That
+takes JavaScript Promise Integration: Chrome and Edge since 137 and Firefox
+since 153 have it, and Safari does not yet — where it is missing the glue
+refuses by name rather than hanging the tab. A loop that pumps once a frame is
+paced by the display, the way a desktop loop is paced by its swap.
+
+The page itself is three lines:
+
+```js
+import { Platform } from "./fluxion-platform.js";
+
+const platform = new Platform({ canvas: document.querySelector("canvas") });
+await platform.run("./game.wasm");
+```
+
+The first windows take the canvases the page handed over, in order; any after
+that are made and appended. `run(url, { with: [glue] })` merges another glue's
+imports into the same module — `fluxion-webgl.js`, say — and hands it the
+module's memory afterwards. `platform.canvas(win.native())` is the element
+behind a window, for a WebGPU binding that wants to make a surface from it.
+
+**What a page cannot do is refused by name**, as everywhere else: there is no
+screen position to read or set, nothing to iconify, no visible pointer held
+inside an element (`.captured`), no warping the pointer, no display mode to
+switch (`.exclusive`), and no Vulkan. The rest maps onto the page: a title is
+`document.title`, maximised is filling the page, sizes are CSS pixels and the
+framebuffer is device pixels, the scale is `devicePixelRatio` and changes when
+the page is zoomed.
+
+**Some things need a person to have just done something.** Browsers grant
+pointer lock, fullscreen and a phone's soft keyboard only in answer to a click
+or a key. The call is accepted either way, and if the browser turned it down
+the glue asks again inside the next click or key press on the canvas — which is
+what "click to capture the mouse" means on every web game. Escape always takes
+pointer lock and fullscreen back; the next click takes the pointer again.
+
+**OpenGL is WebGL, and it is not reached through addresses.** A window made
+with `.gl = .{ .api = .opengl_es, .major = 3, .minor = 0 }` gets WebGL 2 on its
+canvas, ES 2.0 gets WebGL 1 or 2, and desktop OpenGL is refused rather than
+quietly handed ES, whose shaders are another language. `contextConfig` reads
+back what the browser really gave. But `getProcAddress` answers null for every
+name: WebGL is JavaScript, a wasm module calls it through imports rather than
+pointers, and [Fluxion WebGL](https://github.com/kisstp2006/fluxion-webgl) is
+the binding that declares them. Both glues can own one canvas — whichever asks
+for a context first makes it, and the other gets the same one.
+
+**A lost context is the Android pair of events.** A GPU reset, or a phone
+taking the memory back, arrives as `.surface_lost`; the context coming back
+arrives as `.surface_created`. A program already written for a phone rebuilds
+its GL objects there and is correct in a browser too. Likewise a hidden tab is
+`.suspended` and a shown one `.resumed`: animation frames stop in between, and
+a program gets one last turn to hear that they are about to.
+
+**Text goes through a hidden field once text input is on**, because an input
+method and a soft keyboard attach only to something editable and a canvas is
+not. With it off, `.char` comes straight from the keyboard as on a desktop.
+Dropped files arrive as `.drop` with names rather than paths — a page never
+sees a path — and `platform.web.droppedFile` hands over the bytes.
+
+Controllers need no mapping file in the common case, for the same reason as
+everywhere else: a browser that recognises a pad says `mapping: "standard"` and
+puts every control where the W3C layout says, which is this library's layout.
+And a pad appears only once a button has been pressed with the page visible —
+browsers keep them hidden until then, so that a page cannot fingerprint what is
+plugged in.
+
 ## Backends are loaded, not linked
 
 Every entry point is fetched by name through
@@ -372,6 +500,11 @@ protocol's descriptors are exported by the library and fetched by name;
 xdg-shell's are not, so this library writes those four out by hand — which is
 what SDL does, and what GLFW does since it started loading Wayland
 dynamically.
+
+The web backend is the one that loads nothing, because there is nothing to
+open: its calls are WebAssembly imports, resolved by the page before the
+module runs. It is imported only for `wasm32-freestanding` - the one target
+where a page is what is on the other side.
 
 `platform.supported` is what this build could open; `ctx.backend()` is what this
 run actually got.
@@ -403,9 +536,23 @@ zig build example-window   # a window, and every event it produces
 zig build example-gl       # an OpenGL context, clearing to a colour that moves
 zig build example-text     # typing, and the difference between a key and a letter
 zig build example-vulkan   # an instance from fluxion-vulkan, and the surface made from a window
+zig build example-web      # the browser examples, into zig-out/web
 ```
 
 The second takes `--frames N` so a run ends on its own.
+
+The browser examples are a page rather than a program: both modules, both
+glues and an `index.html`, in `zig-out/web`. Serve that directory rather than
+opening it - a page cannot `fetch` its own `file://` neighbours, and ES modules
+will not load from one either:
+
+```bash
+python -m http.server 8000 --directory zig-out/web
+```
+
+`web.wasm` exports `frame` and runs everywhere; `web_loop.wasm` is `gl.zig`'s
+desktop loop, unchanged, for a browser with JavaScript Promise Integration.
+The page switches between them, and prints every event either produces.
 
 ## Tests
 
@@ -422,6 +569,14 @@ Both desktop backends carry the same end-to-end test: open a hidden window,
 put a real message into the system's own queue, and check it comes back out of
 `poll` as an event naming that window. They skip rather than fail where there
 is no session to open.
+
+The web backend runs its tests on every host, against a page that is not
+there: `web_stub.zig` answers every import the browser would, and a test
+queues what a listener would have heard and reads back the event the backend
+made of it. What keeps the stub honest is the suite's other half - it also
+*compiles* the library and both browser examples for `wasm32-freestanding`,
+where `web.verify` compares every import against the stub's signature, so the
+two cannot drift apart without the build saying so.
 
 To run the Linux tests from a Windows checkout:
 

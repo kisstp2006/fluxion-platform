@@ -1732,7 +1732,9 @@ export class Platform {
 
   writeMonitor(ptr) {
     const screen = window.screen;
-    if (!screen) return 0;
+    // A page with no screen to speak of - a hidden webview, a headless
+    // browser - reports one that is zero by zero. No monitor is the truth.
+    if (!screen || !(screen.width > 0) || !(screen.height > 0)) return 0;
     const view = this.view;
     view.setFloat64(ptr, screen.left ?? 0, true);
     view.setFloat64(ptr + 8, screen.top ?? 0, true);
