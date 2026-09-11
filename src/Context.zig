@@ -57,7 +57,8 @@ const text_mod = @import("text.zig");
 /// handle on a target with no run-time loading - `wasm32`, and anything else
 /// `std.DynLib` does not cover - so a backend built on one cannot even be
 /// sized there, and importing it anyway would fail the build for a program
-/// that only wanted `Key`.
+/// that only wanted `Key`. The web backend is the other way round: its calls
+/// are imports only a page can satisfy, so it is imported only for one.
 const posix_desktop = switch (builtin.os.tag) {
     .linux, .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => !builtin.abi.isAndroid(),
     else => false,
@@ -68,6 +69,9 @@ const win32 = if (builtin.os.tag == .windows) @import("backend/win32.zig") else 
 const x11 = if (posix_desktop) @import("backend/x11.zig") else void;
 const wayland = if (posix_desktop) @import("backend/wayland.zig") else void;
 const android = if (builtin.abi.isAndroid()) @import("backend/android.zig") else void;
+// The one backend that needs no loader at all: its calls are WebAssembly
+// imports, resolved by the page before the module runs.
+const web = if (platform.is_web) @import("backend/web.zig") else void;
 
 const Context = @This();
 
@@ -162,6 +166,10 @@ fn openOne(gpa: Allocator, which: platform.Backend) Error!Opened {
             if (!builtin.abi.isAndroid()) return error.Unsupported;
             return .{ .vtable = &android.vtable, .impl = try android.open(gpa) };
         },
+        .web => {
+            if (!platform.is_web) return error.Unsupported;
+            return .{ .vtable = &web.vtable, .impl = try web.open(gpa) };
+        },
         .none => return .{ .vtable = &none.vtable, .impl = try none.open(gpa) },
     }
 }
@@ -212,6 +220,14 @@ pub fn createWindow(self: *Context, desc: Window.Desc) Error!Window {
 ///
 /// Does not block. Everything unread from the last pump is dropped, because an
 /// event nobody looked at by the next frame is stale by definition.
+///
+/// **In a browser, a program whose `main` is a loop is the exception**: this
+/// is where it gives the page its turn, and it returns at the next animation
+/// frame. Nothing is drawn and nothing is heard until a module lets go, so a
+/// loop that pumps once a frame is paced by the display - which is what a
+/// desktop loop gets from its swap. A program that exports `frame` instead
+/// returns to the page by returning, and this never waits there. See
+/// `backend/web.zig`.
 pub fn pump(self: *Context) Error!void {
     self.queue.clear();
     try self.vtable.pump(self.impl, &self.queue);
@@ -230,6 +246,8 @@ pub fn pump(self: *Context) Error!void {
 ///
 /// For a program that redraws only when something changed. One that animates
 /// should use `pump` and let the presentation rate set the pace.
+///
+/// A page that calls `frame` cannot be slept, so there this is `pump`.
 pub fn pumpWait(self: *Context, timeout_ms: ?u32) Error!void {
     try self.vtable.wait(self.impl, timeout_ms);
     try self.pump();

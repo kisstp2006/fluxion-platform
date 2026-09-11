@@ -36,6 +36,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // The other half of the web backend: the JavaScript every page needs beside
+    // the module. Named, so that a program building for the browser installs
+    // it with
+    //   b.addInstallFile(fluxion.namedLazyPath("fluxion-platform.js"), "web/fluxion-platform.js");
+    // rather than reaching into this package's source tree by path.
+    const web_glue = b.path("src/backend/web.js");
+    b.addNamedLazyPath("fluxion-platform.js", web_glue);
+
     // zig build test
     const tests = b.addTest(.{
         .name = "fluxion-platform-tests",
@@ -44,6 +52,63 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run the library test suite");
     test_step.dependOn(&run_tests.step);
+
+    // The tests above run on this machine, where the web backend talks to its
+    // stub and never to `web_imports.zig` - the whole point of that file is
+    // that it exists for one target. So the suite also *builds* the library for
+    // that target, through every vtable entry, without running anything.
+    //
+    // That is not a formality. Compiling for the browser is what analyses the
+    // imports, and analysing them is what runs `web.verify`, which is what
+    // proves the stub the tests just used has the same signatures the page
+    // will be handed. A mismatch is a compile error here rather than an
+    // argument quietly coerced in somebody's tab.
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fluxion_dyn", .module = b.dependency("fluxion_dyn", .{
+                .target = wasm_target,
+                .optimize = optimize,
+            }).module("fluxion_dyn") },
+        },
+    });
+    const wasm_check = b.addExecutable(.{
+        .name = "fluxion-platform-wasm-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.addWriteFiles().add("wasm_check.zig",
+                \\//! The library as a browser build sees it. Nothing calls this: that
+                \\//! it compiles, imports and all, is the test.
+                \\const std = @import("std");
+                \\const platform = @import("fluxion_platform");
+                \\
+                \\pub const std_options: std.Options = .{ .logFn = platform.web.logFn };
+                \\pub const panic = platform.web.panic;
+                \\
+                \\export fn check() void {
+                \\    var ctx = platform.Context.init(std.heap.wasm_allocator, .{}) catch return;
+                \\    defer ctx.deinit();
+                \\    const win = ctx.createWindow(.{}) catch return;
+                \\    defer win.destroy();
+                \\    ctx.pump() catch {};
+                \\    std.log.info("{d} dropped bytes", .{
+                \\        (platform.web.droppedFile(&ctx, 0, std.heap.wasm_allocator) catch &.{}).len,
+                \\    });
+                \\}
+            ),
+            .target = wasm_target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "fluxion_platform", .module = wasm_mod }},
+        }),
+    });
+    wasm_check.entry = .disabled;
+    wasm_check.rdynamic = true;
+    test_step.dependOn(&wasm_check.step);
 
     // zig build docs -> zig-out/docs
     const docs_lib = b.addLibrary(.{
@@ -74,13 +139,39 @@ pub fn build(b: *std.Build) void {
     ) orelse (b.pkg_hash.len == 0);
     if (!examples_wanted) return;
 
-    // On the first run after a clean checkout this comes back null and the
-    // build runner fetches it and starts again, so returning here is not
-    // giving up - it is the first half of the fetch.
-    const vulkan_dep = b.lazyDependency("fluxion_vulkan", .{
+    // On the first run after a clean checkout these come back null and the
+    // build runner fetches them and starts again, so returning here is not
+    // giving up - it is the first half of the fetch. Both are asked for before
+    // either is checked, so that one fetch brings both.
+    const maybe_vulkan = b.lazyDependency("fluxion_vulkan", .{
         .target = target,
         .optimize = optimize,
-    }) orelse return;
+    });
+    // The browser examples draw with `fluxion-webgl`, for the reason the
+    // Vulkan one makes its instance with `fluxion-vulkan`: this library ends
+    // at the canvas, and a program brings its own binding. Always for the
+    // browser, whatever `-Dtarget` said, because a browser will take nothing
+    // else.
+    const maybe_webgl = b.lazyDependency("fluxion_webgl", .{
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    const vulkan_dep = maybe_vulkan orelse return;
+    const webgl_dep = maybe_webgl orelse return;
+
+    addWebExamples(b, .{
+        .platform = wasm_mod,
+        .webgl = webgl_dep,
+        .glue = web_glue,
+        .target = wasm_target,
+        .optimize = optimize,
+        .test_step = test_step,
+    });
+
+    // A desktop example wants a process, stdout and an `Io` to write it
+    // through, and a wasm module has none of the three. The browser has its
+    // own examples, above.
+    if (target.result.cpu.arch.isWasm()) return;
 
     // zig build example runs the tour; zig build example-<name> runs one of the
     // others; zig build examples runs all of them, in this order.
@@ -168,5 +259,78 @@ pub fn build(b: *std.Build) void {
             .root_module = example_mod,
         });
         test_step.dependOn(&b.addRunArtifact(example_tests).step);
+    }
+}
+
+const WebExamples = struct {
+    /// The library, built for the browser.
+    platform: *std.Build.Module,
+    webgl: *std.Build.Dependency,
+    /// `src/backend/web.js`.
+    glue: std.Build.LazyPath,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    test_step: *std.Build.Step,
+};
+
+/// The browser examples: two modules, the two glues they are instantiated
+/// with, and a page to open them in - all in `zig-out/web`, which is the
+/// directory to serve. A page cannot `fetch` its own `file://` neighbours, so
+/// it has to be served rather than opened.
+fn addWebExamples(b: *std.Build, web: WebExamples) void {
+    const step = b.step(
+        "example-web",
+        "The browser examples, into zig-out/web - serve that directory and open it",
+    );
+
+    step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("examples/web"),
+        .install_dir = .prefix,
+        .install_subdir = "web",
+    }).step);
+    step.dependOn(&b.addInstallFile(web.glue, "web/fluxion-platform.js").step);
+    step.dependOn(&b.addInstallFile(
+        web.webgl.path("examples/web/fluxion-webgl.js"),
+        "web/fluxion-webgl.js",
+    ).step);
+
+    const examples = [_]struct {
+        name: []const u8,
+        /// Exports `init`, `frame` and `deinit` for the page to call, rather
+        /// than having a `main` of its own.
+        exports_frame: bool,
+    }{
+        // The shape that runs in every browser.
+        .{ .name = "web", .exports_frame = true },
+        // A desktop loop, unchanged, for a browser that can suspend a module.
+        .{ .name = "web_loop", .exports_frame = false },
+    };
+
+    for (examples) |example| {
+        const exe = b.addExecutable(.{
+            .name = example.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example.name})),
+                .target = web.target,
+                .optimize = web.optimize,
+                .imports = &.{
+                    .{ .name = "fluxion_platform", .module = web.platform },
+                    .{ .name = "fluxion_webgl", .module = web.webgl.module("fluxion_webgl") },
+                },
+            }),
+        });
+        if (example.exports_frame) {
+            // No `main`: the page calls the exports when it is ready, and
+            // without `rdynamic` the linker drops every one of them as unused.
+            exe.entry = .disabled;
+            exe.rdynamic = true;
+        }
+        step.dependOn(&b.addInstallArtifact(exe, .{
+            .dest_dir = .{ .override = .{ .custom = "web" } },
+        }).step);
+
+        // Built, not run, by `zig build test`: a module compiles or it does
+        // not, and whether it draws is for a browser to say.
+        web.test_step.dependOn(&exe.step);
     }
 }

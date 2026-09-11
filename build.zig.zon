@@ -22,6 +22,16 @@
             .hash = "fluxion_vulkan-0.1.0-8VC-cXi2BACsGRvxlmsdVwPAn1sLLUTCkh26YIJv5w_l",
             .lazy = true,
         },
+
+        // What the browser examples draw with, and the JavaScript that goes
+        // with it. Lazy, for the same reason and on the same terms as the
+        // Vulkan binding above: the web backend makes a canvas and a WebGL
+        // context on it, and neither loads nor declares a single WebGL call.
+        .fluxion_webgl = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-webgl#cecc7397527166200af91e19f44f10a29568381f",
+            .hash = "fluxion_webgl-0.1.0-8yvbdaTcAgAt4pOTDmYXVdRfbQx0u9qJTMDLFUn9L3mk",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

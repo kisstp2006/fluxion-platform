@@ -63,6 +63,9 @@ pub fn requiredInstanceExtensions(backend: platform.Backend) []const [*:0]const 
         .x11 => &.{ "VK_KHR_surface", "VK_KHR_xlib_surface" },
         .wayland => &.{ "VK_KHR_surface", "VK_KHR_wayland_surface" },
         .android => &.{ "VK_KHR_surface", "VK_KHR_android_surface" },
+        // A browser has no Vulkan to enable anything on. Its modern API is
+        // WebGPU, which is made from a canvas rather than from an instance.
+        .web => &.{},
         // Nothing to present to, so nothing to enable. A program that asks
         // anyway gets an empty list rather than a lie about what is available.
         .none => &.{},
@@ -71,7 +74,10 @@ pub fn requiredInstanceExtensions(backend: platform.Backend) []const [*:0]const 
 
 /// True where this build could make a surface at all.
 pub fn supported(backend: platform.Backend) bool {
-    return backend != .none;
+    return switch (backend) {
+        .none, .web => false,
+        .win32, .x11, .wayland, .android => true,
+    };
 }
 
 /// `VkStructureType` for each platform's surface-creation struct. These are

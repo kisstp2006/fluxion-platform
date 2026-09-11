@@ -19,6 +19,13 @@
 //! so through `error.Unsupported`. The library still compiles, because a
 //! program that only wanted the key tokens should not have to arrange its
 //! imports around a platform it is not on.
+//!
+//! **A browser is a platform too**, and `wasm32-freestanding` is how a build
+//! says it is for one: there the windowing system is the page, reached through
+//! the imports `backend/web.js` supplies. WASI is not the same thing - a WASI
+//! runtime is a command line with no page behind it, and a module that asked
+//! it for a canvas would not even instantiate - so a `wasm32-wasi` build stays
+//! `.none`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -34,6 +41,9 @@ pub const Backend = enum {
     wayland,
     /// `libandroid.so` and one `ANativeWindow` the system owns.
     android,
+    /// A `<canvas>` and the page around it, through the JavaScript that ships
+    /// beside this library as `fluxion-platform.js`.
+    web,
     /// Nothing. Not a gap: the target has no windowing system this library can
     /// reach, so there is nothing to find.
     none,
@@ -44,6 +54,14 @@ pub const Backend = enum {
         return self == .x11 or self == .wayland;
     }
 };
+
+/// Whether this build runs in a browser: a 32-bit wasm module with nothing
+/// underneath it but the page that instantiated it.
+///
+/// 32-bit only. A `wasm64` module passes every pointer to JavaScript as a
+/// `BigInt`, and the glue is written for the numbers every browser's wasm
+/// actually uses.
+pub const is_web = builtin.cpu.arch == .wasm32 and builtin.os.tag == .freestanding;
 
 /// Every backend this build could open, in the order they are tried.
 ///
@@ -58,6 +76,7 @@ pub const supported: []const Backend = switch (builtin.os.tag) {
         // compatibility layer in the middle.
         &.{ .wayland, .x11 },
     .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => &.{ .wayland, .x11 },
+    .freestanding => if (is_web) &.{.web} else &.{},
     else => &.{},
 };
 
@@ -74,7 +93,8 @@ pub const Error = error{
     Unsupported,
     /// Every backend this build supports was tried and none opened. On Linux
     /// that usually means neither `DISPLAY` nor `WAYLAND_DISPLAY` is set, which
-    /// is what a machine with no graphical session looks like.
+    /// is what a machine with no graphical session looks like. In a browser it
+    /// means a module running in a worker, which has no page to draw on.
     NoDisplay,
     /// The windowing system is there but refused - out of a resource, a
     /// protocol version mismatch, a compositor that denied the connection.
@@ -135,6 +155,9 @@ test "a platform either has backends to try or has none to try" {
         else => {},
     }
 
+    // The page is a backend only where the build says it is running in one.
+    try testing.expectEqual(is_web, isSupported(.web));
+
     // `none` is the absence of a backend, so it is never in the list of ones to
     // try - otherwise `auto` would "succeed" by finding nothing.
     for (supported) |candidate| try testing.expect(candidate != .none);
@@ -179,5 +202,6 @@ test "the POSIX desktop pair is the two that share their plumbing" {
     try testing.expect(Backend.wayland.isPosixDesktop());
     try testing.expect(!Backend.win32.isPosixDesktop());
     try testing.expect(!Backend.android.isPosixDesktop());
+    try testing.expect(!Backend.web.isPosixDesktop());
     try testing.expect(!Backend.none.isPosixDesktop());
 }

@@ -52,6 +52,13 @@
 //! - so a program written to handle them is correct on a phone and unchanged
 //! everywhere else.
 //!
+//! **A browser is a backend like the others.** Built for `wasm32-freestanding`
+//! a window is a `<canvas>`, the events come from the page through
+//! `fluxion-platform.js`, and a lost WebGL context is the same pair of events
+//! a phone sends. What differs is who owns the loop: see `web` and
+//! `backend/web.zig` for the two ways a program can live with a page that
+//! cannot be blocked.
+//!
 //! Nothing here allocates except through the allocator handed to
 //! `Context.init`.
 
@@ -68,6 +75,8 @@ pub const gamepad = @import("gamepad.zig");
 pub const gl = @import("gl.zig");
 pub const vulkan = @import("vulkan.zig");
 pub const text = @import("text.zig");
+/// The console and the panic handler a browser build needs. See `web`.
+pub const web = @import("web.zig");
 
 /// The connection to the windowing system. See `Context`.
 pub const Context = @import("Context.zig");
@@ -154,6 +163,7 @@ test {
     _ = gl;
     _ = vulkan;
     _ = text;
+    _ = web;
     _ = @import("window_ops_test.zig");
     _ = @import("cursor_test.zig");
     _ = @import("monitor_test.zig");
@@ -179,6 +189,14 @@ test {
     _ = @import("backend/android_gamepad.zig");
     // Same again: JNI table offsets are arithmetic, checkable anywhere.
     _ = @import("backend/android_text.zig");
+    // And the web backend in full: off a browser it talks to `web_stub.zig`,
+    // a fake page, so the whole path from a record to an event is checked on
+    // whatever machine runs the tests.
+    _ = @import("backend/web.zig");
+    _ = @import("backend/web_wire.zig");
+    _ = @import("backend/web_keys.zig");
+    _ = @import("backend/web_gamepad.zig");
+    _ = @import("backend/web_stub.zig");
     // The protocol ABI tests inside these run wherever the backends do, which
     // is every target that has a windowing system to reach.
     if (os == .linux or os == .freebsd or os == .netbsd or os == .openbsd) {

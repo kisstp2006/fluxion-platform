@@ -1,0 +1,153 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: BSL-1.0 -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fluxion Platform</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --ink: #e8e8ea;
+        --dim: #8a8a95;
+        --ground: #0f1013;
+        --panel: #191a1f;
+        --line: #2a2b33;
+        --warn: #ffd27a;
+        --bad: #ff8a8a;
+      }
+      * { box-sizing: border-box; }
+      /* `height`, not `min-height`, and nothing that scrolls. The glue sets the
+         canvas's drawing buffer from its measured size; a page that grew to fit
+         its content would let the two chase each other for ever. */
+      body {
+        margin: 0;
+        height: 100vh;
+        overflow: hidden;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        grid-template-columns: 1fr minmax(18rem, 34%);
+        background: var(--ground);
+        color: var(--ink);
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      }
+      header {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+      h1 { font-size: 15px; font-weight: 600; margin: 0; }
+      h1 span { color: var(--dim); font-weight: 400; }
+      nav { display: flex; gap: 6px; margin-left: auto; }
+      nav a {
+        color: var(--ink);
+        text-decoration: none;
+        background: #23242b;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 4px 12px;
+      }
+      nav a[aria-current="page"] { background: #34526e; border-color: #4a7ba8; }
+      /* The canvas fills what is left over rather than deciding what is left
+         over: out of flow, and sized by its container. */
+      main { position: relative; min-height: 0; }
+      canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+      aside {
+        min-height: 0;
+        border-left: 1px solid var(--line);
+        background: #121317;
+        overflow-y: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        padding: 8px 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      aside .debug { color: var(--dim); }
+      aside .warn { color: var(--warn); }
+      aside .error { color: var(--bad); }
+      footer {
+        grid-column: 1 / -1;
+        padding: 6px 16px;
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+        color: var(--dim);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+      footer.bad { color: var(--bad); }
+      @media (max-width: 720px) {
+        body { grid-template-columns: 1fr; grid-template-rows: auto 1fr 30% auto; }
+        aside { border-left: 0; border-top: 1px solid var(--line); }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Fluxion Platform <span>&mdash; the web backend</span></h1>
+      <nav>
+        <a id="frame" href="?example=frame">exports frame</a>
+        <a id="loop" href="?example=loop">main loop</a>
+      </nav>
+    </header>
+
+    <main><canvas id="canvas"></canvas></main>
+    <aside id="log" aria-live="polite"></aside>
+
+    <footer id="status">loading&hellip;</footer>
+
+    <script type="module">
+      import { Platform } from "./fluxion-platform.js";
+      import { Fluxion } from "./fluxion-webgl.js";
+
+      const example = new URLSearchParams(location.search).get("example") === "loop" ? "loop" : "frame";
+      const module = example === "loop" ? "web_loop.wasm" : "web.wasm";
+      document.getElementById(example).setAttribute("aria-current", "page");
+
+      const canvas = document.getElementById("canvas");
+      const panel = document.getElementById("log");
+      const status = document.getElementById("status");
+
+      function say(text, bad = false) {
+        status.textContent = text;
+        status.classList.toggle("bad", bad);
+      }
+
+      // Every line the program logs, on the page as well as in the console.
+      // The oldest go once there are enough to scroll through.
+      function log(level, text) {
+        const line = document.createElement("div");
+        line.className = ["debug", "info", "warn", "error"][level] ?? "info";
+        line.textContent = text;
+        const atEnd = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 4;
+        panel.append(line);
+        while (panel.childElementCount > 400) panel.firstElementChild.remove();
+        if (atEnd) panel.scrollTop = panel.scrollHeight;
+        (level >= 3 ? console.error : level === 2 ? console.warn : console.log)(text);
+      }
+
+      // Both glues on the one canvas. `fluxion-webgl.js` makes the WebGL
+      // context now, because its imports need one before the module exists;
+      // the platform finds it when the program makes its window, and reports
+      // what it really is.
+      const platform = new Platform({ canvas, log });
+      const webgl = new Fluxion(canvas, { attributes: { stencil: true } });
+
+      say(`${module}  ${webgl.isWebGL2 ? "WebGL 2" : "WebGL 1"}  ` +
+        `JSPI ${Platform.jspi ? "yes" : "no"}  - click the canvas, then try F, L, T, M`);
+
+      try {
+        await platform.run(`./${module}`, { with: [webgl] });
+        say(`${module} has ended - reload to run it again`);
+      } catch (error) {
+        say(String(error.message ?? error), true);
+        log(3, String(error.stack ?? error));
+      }
+    </script>
+  </body>
+</html>

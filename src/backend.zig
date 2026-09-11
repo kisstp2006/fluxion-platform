@@ -105,6 +105,11 @@ pub const Vtable = struct {
     ///
     /// Must not block. `wait` is the one that may, and only until something
     /// arrives or the timeout runs out.
+    ///
+    /// The web backend bends this in one case, because a page does: when the
+    /// program's `main` is a loop, a pump is where the module is suspended
+    /// until the next animation frame. Nothing else would ever let the browser
+    /// draw or deliver an event. See `backend/web.zig`.
     pump: *const fn (impl: Impl, queue: *Queue) Error!void,
 
     /// Block until there is something to pump, or `timeout_ms` passes. A null
