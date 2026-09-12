@@ -476,7 +476,11 @@ pub fn nativeActivityOnCreate(
     activity.callbacks.* = callbacks;
     activity.instance = &glue;
 
-    glue.activity = activity;
+    // A process can outlive its activity and be handed a new one. Nothing the
+    // last one left behind - its window, its input queue, having been
+    // destroyed - belongs to this one. Its pipes are left open rather than
+    // closed: its thread may still be writing its last answer into them.
+    glue = .{ .activity = activity };
     var cmd_fds: [2]c_int = .{ -1, -1 };
     var ack_fds: [2]c_int = .{ -1, -1 };
     if (c.pipe(&cmd_fds) != 0) return;
@@ -510,28 +514,50 @@ extern fn fluxionMain() void;
 fn appThread() void {
     glue.app_running.store(true, .release);
     fluxionMain();
-    glue.app_running.store(false, .release);
 
-    // Answer anything the UI thread is waiting on right now, then ask for the
-    // activity to end - a program whose `main` has returned is finished, and
-    // leaving the activity up would leave a window nothing draws into.
+    endActivity();
+    glue.app_running.store(false, .release);
+    // Answer anything the UI thread is waiting on right now.
     glue.ack();
-    finishActivity();
 }
 
-/// `ANativeActivity_finish`, fetched by name like everything else. Absent only
-/// if this is not Android, in which case none of this ran.
-fn finishActivity() void {
-    const activity = glue.activity orelse return;
-
+/// Let go of the activity once the program's `main` has returned.
+///
+/// Before `app_running` goes false, which is what keeps a UI thread that is
+/// tearing the activity down blocked in its callback, waiting on this one: the
+/// input queue and the activity are still there to be let go of.
+///
+/// The input queue comes off this thread's looper first. Android keeps only a
+/// bare pointer to the looper, which ends with this thread, and disposing the
+/// queue later unregisters from it all the same - a use-after-free that
+/// bionic aborts the process for. Then the activity is asked to finish: a
+/// program whose `main` has returned is done, and leaving the activity up
+/// would leave a window nothing draws into.
+fn endActivity() void {
     var lib = dyn.Library.openAny(candidates) catch return;
     defer lib.close();
 
-    const finish = lib.lookup(
-        *const fn (*ANativeActivity) callconv(.c) void,
-        "ANativeActivity_finish",
-    ) orelse return;
+    if (Glue.take(&glue.input, AInputQueue)) |queue| {
+        Glue.set(&glue.input, null);
+        const detach = lib.lookup(*const fn (*AInputQueue) callconv(.c) void, "AInputQueue_detachLooper");
+        if (detach) |f| f(queue);
+    }
+
+    const activity = liveActivity() orelse return;
+    const finish = lib.lookup(*const fn (*ANativeActivity) callconv(.c) void, "ANativeActivity_finish") orelse return;
     finish(activity);
+}
+
+/// The activity, while there is one.
+///
+/// Null once `onDestroy` has been answered: the system frees the activity as
+/// soon as that callback returns, and a program that carries on after
+/// `.close` must not reach it through the old pointer. Only the app thread
+/// asks, and that thread marks the activity destroyed before it answers - so
+/// what this hands out stays good until that thread next pumps.
+fn liveActivity() ?*ANativeActivity {
+    if (glue.destroyed.load(.acquire)) return null;
+    return glue.activity;
 }
 
 // -------------------------------------------------------------------------
@@ -870,7 +896,7 @@ fn readDensity(self: *Impl) ?f32 {
     const from = self.a.AConfiguration_fromAssetManager orelse return null;
     const get = self.a.AConfiguration_getDensity orelse return null;
 
-    const activity = glue.activity orelse return null;
+    const activity = liveActivity() orelse return null;
     const assets = activity.assetManager orelse return null;
 
     const config = new() orelse return null;
@@ -897,7 +923,7 @@ fn readDensity(self: *Impl) ?f32 {
 /// False where there is no activity or no VM to ask.
 fn ensureText(self: *Impl) bool {
     if (self.text.ready()) return true;
-    const activity = glue.activity orelse return false;
+    const activity = liveActivity() orelse return false;
     // `activity.vm` is already C's `JavaVM*` - a pointer to a pointer to the
     // table - so this is a cast and not a dereference.
     const vm: android_text.JavaVm = @ptrCast(@alignCast(activity.vm orelse return false));
@@ -936,7 +962,7 @@ fn pushChar(self: *Impl, id: event.WindowId, action: i32, code: i32, meta: i32) 
 fn setTextInput(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
     const self = cast(impl);
     const win = castWindow(native);
-    const activity = glue.activity orelse return error.Unavailable;
+    const activity = liveActivity() orelse return error.Unavailable;
 
     if (on) {
         self.a.ANativeActivity_showSoftInput(activity, show_soft_input_implicit);
@@ -969,7 +995,7 @@ fn preedit(impl: backend.Impl) ?*const text_mod.Preedit {
 fn clipboardEnv(self: *Impl) ?jni.JniEnv {
     if (!ensureText(self)) return null;
     const env = self.text.env orelse return null;
-    const activity = glue.activity orelse return null;
+    const activity = liveActivity() orelse return null;
     if (!self.clipboard.open(env, activity.clazz)) return null;
     return env;
 }
@@ -983,7 +1009,7 @@ fn setClipboardText(impl: backend.Impl, text: []const u8) Error!void {
 fn clipboardText(impl: backend.Impl, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
     const self = cast(impl);
     const env = clipboardEnv(self) orelse return error.Unavailable;
-    const activity = glue.activity orelse return error.Unavailable;
+    const activity = liveActivity() orelse return error.Unavailable;
     try self.clipboard.readText(env, activity.clazz, gpa, out);
 }
 
