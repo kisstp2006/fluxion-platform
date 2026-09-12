@@ -40,6 +40,7 @@ const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
 const virtual_key = @import("virtual_key.zig");
 const clipboard = @import("clipboard.zig");
+const win32_dialog = @import("win32_dialog.zig");
 
 const Error = platform.Error;
 
@@ -198,7 +199,11 @@ const ws_clipchildren: u32 = 0x02000000;
 const sw_hide: i32 = 0;
 const sw_show: i32 = 5;
 
+const pm_noremove: u32 = 0x0000;
 const pm_remove: u32 = 0x0001;
+const qs_sendmessage: u32 = 0x0040;
+const pm_qs_sendmessage: u32 = qs_sendmessage << 16;
+const wait_object_0: u32 = 0;
 const cw_usedefault: i32 = @bitCast(@as(u32, 0x80000000));
 
 const gwlp_userdata: i32 = -21;
@@ -466,6 +471,8 @@ const User32 = struct {
     SetClipboardData: *const fn (u32, ?*anyopaque) callconv(.winapi) ?*anyopaque,
     GetClipboardData: *const fn (u32) callconv(.winapi) ?*anyopaque,
     IsClipboardFormatAvailable: *const fn (u32) callconv(.winapi) i32,
+    EnumThreadWindows: *const fn (u32, *const fn (HWND, LPARAM) callconv(.winapi) i32, LPARAM) callconv(.winapi) i32,
+    GetClassNameW: *const fn (HWND, [*]u16, i32) callconv(.winapi) i32,
     /// Layered-window transparency. Windows 2000 and later, so present
     /// everywhere this library runs, but optional rather than assumed.
     SetLayeredWindowAttributes: ?*const fn (HWND, u32, u8, u32) callconv(.winapi) i32 = null,
@@ -487,6 +494,12 @@ const Kernel32 = struct {
     GlobalUnlock: *const fn (?*anyopaque) callconv(.winapi) i32,
     GlobalSize: *const fn (?*anyopaque) callconv(.winapi) usize,
     Sleep: *const fn (u32) callconv(.winapi) void,
+    WaitForSingleObject: *const fn (*anyopaque, u32) callconv(.winapi) u32,
+    GetThreadId: *const fn (*anyopaque) callconv(.winapi) u32,
+    CreateFileW: *const fn ([*:0]const u16, u32, u32, ?*anyopaque, u32, u32, ?*anyopaque) callconv(.winapi) ?*anyopaque,
+    GetFileSizeEx: *const fn (*anyopaque, *i64) callconv(.winapi) i32,
+    ReadFile: *const fn (*anyopaque, [*]u8, u32, *u32, ?*anyopaque) callconv(.winapi) i32,
+    CloseHandle: *const fn (*anyopaque) callconv(.winapi) i32,
 };
 
 /// `CF_UNICODETEXT`. Windows makes the other text formats from it, and it from
@@ -576,6 +589,13 @@ const Impl = struct {
     /// What owns the text this program puts on the clipboard. Made on the first
     /// copy; see `clipboardOwner`.
     clipboard_owner: ?HWND = null,
+
+    /// Loaded for the first file dialog.
+    shell: ?win32_dialog.Shell = null,
+    /// The file dialog that is open, whose thread's end `pump` looks for.
+    dialog: ?*win32_dialog.Dialog = null,
+    /// What the last dialog's answer carried, kept until the next pump.
+    answers: std.heap.ArenaAllocator,
 };
 
 const Native = struct {
@@ -655,6 +675,8 @@ pub const vtable: backend.Vtable = .{
     .setClipboardText = setClipboardText,
     .clipboardText = clipboardText,
     .hasClipboardText = hasClipboardText,
+    .showFileDialog = showFileDialog,
+    .chosenFile = chosenFile,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -746,12 +768,16 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .k = k,
         .instance = instance,
         .atom = atom,
+        .answers = .init(gpa),
     };
     return self;
 }
 
 fn deinit(impl: backend.Impl, gpa: Allocator) void {
     const self = cast(impl);
+    if (self.dialog) |job| endDialog(self, job);
+    self.answers.deinit();
+    if (self.shell) |*shell| shell.close();
     // The text stays on the clipboard: it was handed over, not lent.
     if (self.clipboard_owner) |hwnd| _ = self.u.DestroyWindow(hwnd);
     _ = self.u.UnregisterClassW(class_name, self.instance);
@@ -1143,6 +1169,107 @@ fn hasClipboardText(impl: backend.Impl) bool {
     return cast(impl).u.IsClipboardFormatAvailable(cf_unicodetext) != 0;
 }
 
+// -------------------------------------------------------------------------
+// File dialogs, each on a thread of its own - see `win32_dialog`
+// -------------------------------------------------------------------------
+
+fn showFileDialog(impl: backend.Impl, gpa: Allocator, request: backend.DialogRequest) Error!void {
+    if (builtin.single_threaded) return error.Unavailable;
+    const self = cast(impl);
+    if (self.dialog != null) return error.Unavailable;
+    if (self.shell == null) self.shell = try win32_dialog.Shell.open();
+
+    const owner: ?*anyopaque = if (request.owner) |native| @ptrCast(castWindow(native).hwnd) else null;
+    const job = try win32_dialog.Dialog.create(gpa, self.shell.?.calls, owner, request);
+    errdefer job.destroy();
+    try job.spawn();
+    self.dialog = job;
+}
+
+/// The thread has ended, so what it left may be read.
+fn answerDialog(self: *Impl, job: *win32_dialog.Dialog) void {
+    job.thread.join();
+    self.dialog = null;
+    defer job.destroy();
+
+    const paths = job.paths(self.answers.allocator()) catch blk: {
+        self.push_failed = true;
+        break :blk &.{};
+    };
+    push(self, .{ .file_dialog = .{ .window = job.window, .id = job.id, .paths = paths } });
+}
+
+/// Close a dialog and wait for its thread, answering what that thread sends
+/// here meanwhile: giving the owner back its keyboard is a message sent across
+/// threads, and waiting without answering it would wait for ever.
+fn endDialog(self: *Impl, job: *win32_dialog.Dialog) void {
+    const thread = job.thread.getHandle();
+    while (true) {
+        closeDialog(self, job);
+        if (self.u.MsgWaitForMultipleObjects(1, @ptrCast(&thread), 0, 50, qs_sendmessage) == wait_object_0) break;
+        var msg: Msg = .{};
+        _ = self.u.PeekMessageW(&msg, null, 0, 0, pm_noremove | pm_qs_sendmessage);
+    }
+    job.thread.join();
+    job.destroy();
+    self.dialog = null;
+}
+
+/// Before the dialog is shown the thread gives up on its own; after, closing
+/// its window is Cancel, as it is for any dialog box.
+fn closeDialog(self: *Impl, job: *win32_dialog.Dialog) void {
+    job.abandon();
+    const thread = self.k.GetThreadId(job.thread.getHandle());
+    if (thread != 0) _ = self.u.EnumThreadWindows(thread, closeIfDialog, @bitCast(@intFromPtr(self)));
+}
+
+fn closeIfDialog(hwnd: HWND, lparam: LPARAM) callconv(.winapi) i32 {
+    const self: *Impl = @ptrFromInt(@as(usize, @bitCast(lparam)));
+    var class: [8]u16 = undefined;
+    const len = self.u.GetClassNameW(hwnd, &class, class.len);
+    if (len > 0 and std.mem.eql(u16, class[0..@intCast(len)], dialog_class)) {
+        _ = self.u.PostMessageW(hwnd, wm_close, 0, 0);
+    }
+    return 1;
+}
+
+/// The class of every dialog box, the file dialog's frame among them.
+const dialog_class = std.unicode.utf8ToUtf16LeStringLiteral("#32770");
+
+const generic_read: u32 = 0x80000000;
+const file_share_all: u32 = 0x1 | 0x2 | 0x4;
+const open_existing: u32 = 3;
+const file_attribute_normal: u32 = 0x80;
+const invalid_handle: usize = std.math.maxInt(usize);
+
+/// Read the path, which here is a path. Opened to share with anything that
+/// has it open for writing, as Explorer does, rather than refused.
+fn chosenFile(impl: backend.Impl, index: usize, path: []const u8, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    _ = index;
+    const self = cast(impl);
+    const wide = std.unicode.wtf8ToWtf16LeAllocZ(gpa, path) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.InvalidWtf8 => error.Unavailable,
+    };
+    defer gpa.free(wide);
+
+    const file = self.k.CreateFileW(wide.ptr, generic_read, file_share_all, null, open_existing, file_attribute_normal, null) orelse
+        return error.Unavailable;
+    if (@intFromPtr(file) == invalid_handle) return error.Unavailable;
+    defer _ = self.k.CloseHandle(file);
+
+    var file_size: i64 = 0;
+    if (self.k.GetFileSizeEx(file, &file_size) != 0) try out.ensureUnusedCapacity(gpa, @intCast(@max(file_size, 0)));
+    while (true) {
+        try out.ensureUnusedCapacity(gpa, 64 * 1024);
+        const room = out.unusedCapacitySlice();
+        var got: u32 = 0;
+        if (self.k.ReadFile(file, room.ptr, @intCast(@min(room.len, 1 << 30)), &got, null) == 0) return error.Unavailable;
+        if (got == 0) return;
+        out.items.len += got;
+    }
+}
+
 fn createVulkanSurface(
     impl: backend.Impl,
     native: backend.NativeWindow,
@@ -1178,6 +1305,10 @@ fn createVulkanSurface(
 fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindow) void {
     const self = cast(impl);
     const win = castWindow(native);
+
+    if (self.dialog) |job| {
+        if (job.owner == @as(?*anyopaque, @ptrCast(win.hwnd))) closeDialog(self, job);
+    }
 
     // Before the window: a context outliving its device context is a handle
     // into a window that no longer exists.
@@ -1781,10 +1912,17 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
     self.push_failed = false;
     defer self.queue = null;
 
+    // The last answer's paths were promised until now.
+    _ = self.answers.reset(.retain_capacity);
+
     var msg: Msg = .{};
     while (self.u.PeekMessageW(&msg, null, 0, 0, pm_remove) != 0) {
         _ = self.u.TranslateMessage(&msg);
         _ = self.u.DispatchMessageW(&msg);
+    }
+
+    if (self.dialog) |job| {
+        if (self.k.WaitForSingleObject(job.thread.getHandle(), 0) == wait_object_0) answerDialog(self, job);
     }
 
     if (self.push_failed) return error.OutOfMemory;
@@ -1794,7 +1932,14 @@ fn wait(impl: backend.Impl, timeout_ms: ?u32) Error!void {
     const self = cast(impl);
     const infinite: u32 = 0xFFFFFFFF;
     const qs_allinput: u32 = 0x04FF;
-    _ = self.u.MsgWaitForMultipleObjects(0, null, 0, timeout_ms orelse infinite, qs_allinput);
+    // A dialog's thread ending is as much a reason to pump as a message.
+    var handles: [1]*anyopaque = undefined;
+    var count: u32 = 0;
+    if (self.dialog) |job| {
+        handles[0] = job.thread.getHandle();
+        count = 1;
+    }
+    _ = self.u.MsgWaitForMultipleObjects(count, &handles, 0, timeout_ms orelse infinite, qs_allinput);
 }
 
 fn post(impl: backend.Impl) void {
@@ -2646,4 +2791,59 @@ test "a message posted to the window comes back out as an event" {
     // acted on it.
     var after: Rect = .{};
     try testing.expect(self.u.GetClientRect(hwnd, &after) != 0);
+}
+
+test "a dialog's answer comes out of a pump, naming its window and its id" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+
+    const native = try vtable.createWindow(impl, testing.allocator, @enumFromInt(5), .{
+        .title = "fluxion-platform dialog test",
+        .width = 320,
+        .height = 240,
+        .resizable = true,
+        .decorated = true,
+        .visible = false,
+        .maximized = false,
+        .gl = null,
+    });
+    defer vtable.destroyWindow(impl, testing.allocator, native);
+
+    const request: backend.DialogRequest = .{
+        .id = @enumFromInt(7),
+        .window = @enumFromInt(5),
+        .folder = true,
+        .multiple = false,
+        .title = null,
+        .filters = &.{},
+        .initial_folder = null,
+    };
+    self.shell = win32_dialog.Shell.open() catch return error.SkipZigTest;
+    const job = try win32_dialog.Dialog.create(testing.allocator, self.shell.?.calls, @ptrCast(castWindow(native).hwnd), request);
+    job.abandon();
+    try job.spawn();
+    self.dialog = job;
+
+    try testing.expectError(error.Unavailable, vtable.showFileDialog(impl, testing.allocator, request));
+
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    var answer: ?event.FileDialogEvent = null;
+    for (0..50) |_| {
+        try vtable.wait(impl, 100);
+        queue.clear();
+        try vtable.pump(impl, &queue);
+        while (queue.next()) |ev| {
+            if (ev == .file_dialog) answer = ev.file_dialog;
+        }
+        if (answer != null) break;
+    }
+
+    const got = answer orelse return error.NoAnswerArrived;
+    try testing.expectEqual(request.id, got.id);
+    try testing.expectEqual(request.window, got.window);
+    try testing.expectEqual(@as(usize, 0), got.paths.len);
+    try testing.expectEqual(@as(?*win32_dialog.Dialog, null), self.dialog);
 }

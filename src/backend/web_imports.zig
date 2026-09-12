@@ -159,3 +159,16 @@ pub extern "fluxion_platform" fn clipboardSize() i32;
 
 /// Copy that text into `ptr[0..len]`. Answers how many bytes were copied.
 pub extern "fluxion_platform" fn clipboardRead(ptr: [*]u8, len: u32) u32;
+
+/// Open a file dialog for window `window` - an `<input type="file">` the glue
+/// clicks, now or inside the next click or key press. `flags` is multiple and
+/// folder in bits 0 and 1, `accept` the input's `accept`. Zero when a dialog
+/// is already open or there is no page.
+pub extern "fluxion_platform" fn openFileDialog(window: u32, id: u32, flags: u32, accept_ptr: [*]const u8, accept_len: u32) u32;
+
+/// How many bytes the `index`th file of the last dialog's answer holds, or -1
+/// when there is no such file or it was not read.
+pub extern "fluxion_platform" fn chosenSize(index: u32) i32;
+
+/// Copy that file into `ptr[0..len]`. Answers how many bytes were copied.
+pub extern "fluxion_platform" fn chosenRead(index: u32, ptr: [*]u8, len: u32) u32;

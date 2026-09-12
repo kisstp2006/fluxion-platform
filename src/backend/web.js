@@ -26,9 +26,9 @@
 //   3. Stand in for the parts of a window a page does not have: a hidden text
 //      field for the input method and the soft keyboard, pointer lock for a
 //      captured mouse, the Fullscreen API for a fullscreen window, the last
-//      paste for a clipboard it may not read - and asking again on the next
-//      click for anything the browser would only grant to a person who had
-//      just done something.
+//      paste for a clipboard it may not read, a hidden file input for the
+//      system's file dialog - and asking again on the next click for anything
+//      the browser would only grant to a person who had just done something.
 //
 //   4. Run the program, one of two ways. A module that exports `frame` is
 //      called once per animation frame. A module whose `main` is a loop is
@@ -61,6 +61,8 @@ const KIND = {
   dropFile: 13,
   surfaceLost: 14,
   surfaceCreated: 15,
+  dialogBegin: 16,
+  dialogFile: 17,
 };
 
 /// `Record`: kind, window, a, b, c, d as 32-bit integers from offset 0, then
@@ -78,6 +80,9 @@ const MOD = { shift: 1, control: 2, alt: 4, super: 8, capsLock: 16, numLock: 32 
 /// `createWindow`'s flags, and its context flags.
 const FLAG = { resizable: 1, decorated: 2, visible: 4, maximized: 8 };
 const CONTEXT = { depth: 1, stencil: 2, antialias: 4 };
+
+/// `openFileDialog`'s flags.
+const DIALOG = { multiple: 1, folder: 2 };
 
 /// `backend.WindowState` and `cursor.Mode`, by number.
 const STATE = { iconified: 0, maximized: 1, restored: 2, focused: 3, attention: 4 };
@@ -358,13 +363,15 @@ export class Platform {
   /// their own, appended to `container` - the body, unless told otherwise.
   /// `log(level, text)` is where the program's console lines go.
   /// `maxDropBytes` is the largest dropped file read into memory for
-  /// `web.droppedFile`.
+  /// `web.droppedFile`, and `maxChosenBytes` the most read of one file
+  /// dialog's answer, every file together, for `Context.chosenFile`.
   constructor(options = {}) {
     this.options = options;
     this.pool = canvasesFrom(options.canvas).map((canvas) => ({ canvas, taken: false }));
     this.container = options.container ?? null;
     this.logSink = options.log ?? defaultLog;
     this.maxDropBytes = options.maxDropBytes ?? 256 * 1024 * 1024;
+    this.maxChosenBytes = options.maxChosenBytes ?? 256 * 1024 * 1024;
 
     this.windows = new Map();
     this.nextHandle = 1;
@@ -386,6 +393,10 @@ export class Platform {
     this.gaps = [];
 
     this.dropped = [];
+    /// The file dialog that is open, or waiting for a click to open in.
+    this.dialog = null;
+    /// The files of the last dialog's answer, as `Context.chosenFile` reads them.
+    this.chosen = [];
     this.rawSupported = undefined;
     this.global = null;
     this.focusQueued = false;
@@ -491,6 +502,8 @@ export class Platform {
 
         close: () => {
           for (const win of [...self.windows.values()]) self.release(win);
+          self.dialog?.input.remove();
+          self.dialog = null;
           self.global?.abort();
           self.global = null;
           self.events.length = 0;
@@ -683,6 +696,22 @@ export class Platform {
           const bytes = self.clipboardEncoded();
           const count = Math.min(len >>> 0, bytes.length);
           self.u8.set(bytes.subarray(0, count), ptr >>> 0);
+          return count;
+        },
+
+        openFileDialog: (win, id, flags, acceptPtr, acceptLen) =>
+          self.openFileDialog(win >>> 0, id >>> 0, flags >>> 0, self.text(acceptPtr, acceptLen)),
+
+        chosenSize: (index) => {
+          const file = self.chosen[index >>> 0];
+          return file && file.bytes ? file.bytes.length : -1;
+        },
+
+        chosenRead: (index, ptr, len) => {
+          const file = self.chosen[index >>> 0];
+          if (!file || !file.bytes) return 0;
+          const count = Math.min(len >>> 0, file.bytes.length);
+          self.u8.set(file.bytes.subarray(0, count), ptr >>> 0);
           return count;
         },
       },
@@ -1443,6 +1472,7 @@ export class Platform {
       }
     }
     if (this.clipboardPending !== null) this.writeClipboard();
+    if (this.dialog && !this.dialog.shown) this.showDialog(this.dialog);
   }
 
   local(win, event) {
@@ -1569,6 +1599,74 @@ export class Platform {
     this.dropped = files.map((file, index) => ({ name: file.name, bytes: bytes[index] }));
     this.queue({ kind: KIND.dropBegin, win: win.id, a: files.length });
     files.forEach((file, index) => this.queue({ kind: KIND.dropFile, win: win.id, a: index, text: file.name }));
+  }
+
+  // -- the file dialog --
+
+  /// An `<input type="file">`, clicked for the program. The browser opens it
+  /// only inside a click or a key press, so a request from anywhere else waits
+  /// for the next one - see `gesture`.
+  openFileDialog(win, id, flags, accept) {
+    if (typeof document === "undefined" || this.dialog) return 0;
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = (flags & DIALOG.multiple) !== 0;
+    input.webkitdirectory = (flags & DIALOG.folder) !== 0;
+    if (accept) input.accept = accept;
+    // In the document, or Safari opens nothing; out of sight, because it is
+    // not the page's to show.
+    Object.assign(input.style, { position: "fixed", left: "-10000px", top: "0px", width: "1px", height: "1px", opacity: "0" });
+    document.body.appendChild(input);
+
+    const dialog = { win, id, input, shown: false };
+    this.dialog = dialog;
+    input.addEventListener("change", () => this.dialogChosen(dialog), { once: true });
+    input.addEventListener("cancel", () => this.dialogAnswered(dialog, []), { once: true });
+    if (navigator.userActivation?.isActive ?? true) this.showDialog(dialog);
+    return 1;
+  }
+
+  /// `showPicker` throws when the browser refuses, where `click` fails without
+  /// a word - and a refusal is what tells `gesture` to try again.
+  showDialog(dialog) {
+    try {
+      if (typeof dialog.input.showPicker === "function") dialog.input.showPicker();
+      else dialog.input.click();
+      dialog.shown = true;
+    } catch {
+      dialog.shown = false;
+    }
+  }
+
+  /// Read before the answer is queued, as a drop is, so that everything
+  /// `Context.chosenFile` may be asked for is already here - as much as
+  /// `maxChosenBytes` holds, which a whole folder may not fit in.
+  async dialogChosen(dialog) {
+    const files = [...(dialog.input.files ?? [])];
+    let budget = this.maxChosenBytes;
+    const bytes = await Promise.all(
+      files.map((file) => {
+        if (file.size > budget) return null;
+        budget -= file.size;
+        return file.arrayBuffer().then(
+          (buffer) => new Uint8Array(buffer),
+          () => null,
+        );
+      }),
+    );
+    // A folder's files are named by their path inside it: the one path a page
+    // is ever shown.
+    const chosen = files.map((file, index) => ({ name: file.webkitRelativePath || file.name, bytes: bytes[index] }));
+    this.dialogAnswered(dialog, chosen);
+  }
+
+  dialogAnswered(dialog, files) {
+    if (this.dialog !== dialog) return;
+    this.dialog = null;
+    dialog.input.remove();
+    this.chosen = files;
+    this.queue({ kind: KIND.dialogBegin, win: dialog.win, a: files.length, b: dialog.id });
+    files.forEach((file, index) => this.queue({ kind: KIND.dialogFile, win: dialog.win, a: index, text: file.name }));
   }
 
   // -- the pointer --

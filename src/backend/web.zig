@@ -59,6 +59,7 @@ const testing = std.testing;
 
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
+const dialog = @import("../dialog.zig");
 const event = @import("../event.zig");
 const gamepad = @import("../gamepad.zig");
 const gl = @import("../gl.zig");
@@ -110,6 +111,12 @@ pub const context_flags = struct {
     pub const antialias: u32 = 1 << 2;
 };
 
+/// `openFileDialog`'s `flags`, bit by bit.
+pub const dialog_flags = struct {
+    pub const multiple: u32 = 1 << 0;
+    pub const folder: u32 = 1 << 1;
+};
+
 const Impl = struct {
     gpa: Allocator,
     natives: std.ArrayListUnmanaged(*Native) = .empty,
@@ -127,12 +134,32 @@ const Impl = struct {
     heap: [heap_capacity]u8 = undefined,
     pads: [gamepad.max_devices]wire.GamepadRecord = undefined,
 
-    /// The names of the last drop, kept until the next pump - which is how
-    /// long `DropEvent` promises they last. Reset at the start of each pump.
-    drops: std.heap.ArenaAllocator,
-    drop_names: std.ArrayListUnmanaged([]const u8) = .empty,
-    drop_window: event.WindowId = .none,
-    drop_expected: usize = 0,
+    /// The names of the last drop and the last dialog's answer, kept until the
+    /// next pump - which is how long `DropEvent` and `FileDialogEvent` promise
+    /// they last. Reset at the start of each pump.
+    names: std.heap.ArenaAllocator,
+    drop: Files = .{},
+    chosen: Files = .{},
+};
+
+/// A drop or a dialog's answer, put back together from its records: one that
+/// says how many names follow, then the names.
+const Files = struct {
+    window: event.WindowId = .none,
+    id: event.DialogId = .none,
+    names: std.ArrayListUnmanaged([]const u8) = .empty,
+    expected: usize = 0,
+
+    fn begin(window: event.WindowId, id: event.DialogId, count: i32) Files {
+        return .{ .window = window, .id = id, .expected = @intCast(@max(0, count)) };
+    }
+
+    /// Keep one name. True when it was the last.
+    fn add(self: *Files, arena: Allocator, name: []const u8) Allocator.Error!bool {
+        if (self.names.items.len >= self.expected) return false;
+        try self.names.append(arena, try arena.dupe(u8, name));
+        return self.names.items.len == self.expected;
+    }
 };
 
 const Native = struct {
@@ -182,6 +209,8 @@ pub const vtable: backend.Vtable = .{
     .setClipboardText = setClipboardText,
     .clipboardText = clipboardText,
     .hasClipboardText = hasClipboardText,
+    .showFileDialog = showFileDialog,
+    .chosenFile = chosenFile,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -206,7 +235,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
     errdefer gpa.destroy(self);
 
     if (js.open() == 0) return error.NoDisplay;
-    self.* = .{ .gpa = gpa, .drops = .init(gpa) };
+    self.* = .{ .gpa = gpa, .names = .init(gpa) };
     return self;
 }
 
@@ -214,7 +243,7 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     const self = cast(impl);
     js.close();
     self.natives.deinit(gpa);
-    self.drops.deinit();
+    self.names.deinit();
     gpa.destroy(self);
 }
 
@@ -731,6 +760,66 @@ fn hasClipboardText(impl: backend.Impl) bool {
 }
 
 // -------------------------------------------------------------------------
+// File dialogs
+//
+// An `<input type="file">`, which a browser opens only inside a click or a
+// key press: at once if one has just happened, else in the next. A page gets
+// the files and never a path - names here, bytes from `chosenFile`.
+// -------------------------------------------------------------------------
+
+fn showFileDialog(impl: backend.Impl, gpa: Allocator, request: backend.DialogRequest) Error!void {
+    _ = impl;
+    var accept: std.ArrayListUnmanaged(u8) = .empty;
+    defer accept.deinit(gpa);
+    try acceptList(gpa, &accept, request.filters);
+
+    var flags: u32 = 0;
+    if (request.multiple) flags |= dialog_flags.multiple;
+    if (request.folder) flags |= dialog_flags.folder;
+    const opened = js.openFileDialog(
+        @intFromEnum(request.window),
+        @intFromEnum(request.id),
+        flags,
+        accept.items.ptr,
+        @intCast(accept.items.len),
+    );
+    if (opened == 0) return error.Unavailable;
+}
+
+/// What the glue read of the `index`th file before the answer arrived. The
+/// name in `path` is no use to a page, which has nowhere to look it up.
+fn chosenFile(impl: backend.Impl, index: usize, path: []const u8, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    _ = .{ impl, path };
+    if (index > std.math.maxInt(u32)) return error.Unavailable;
+    const which: u32 = @intCast(index);
+    const len = js.chosenSize(which);
+    if (len < 0) return error.Unavailable;
+    const start = out.items.len;
+    const bytes = try out.addManyAsSlice(gpa, @intCast(len));
+    if (js.chosenRead(which, bytes.ptr, @intCast(bytes.len)) != bytes.len) {
+        out.shrinkRetainingCapacity(start);
+        return error.Unavailable;
+    }
+}
+
+/// The input's `accept`: `.png,.jpg`. Empty - anything - when a filter lets
+/// any file through, since one list is all a page has.
+pub fn acceptList(gpa: Allocator, out: *std.ArrayListUnmanaged(u8), filters: []const dialog.Filter) Allocator.Error!void {
+    for (filters) |filter| {
+        for (filter.extensions) |extension| {
+            const name = dialog.bare(extension);
+            if (std.mem.eql(u8, name, "*")) {
+                out.clearRetainingCapacity();
+                return;
+            }
+            if (out.items.len > 0) try out.append(gpa, ',');
+            try out.append(gpa, '.');
+            try out.appendSlice(gpa, name);
+        }
+    }
+}
+
+// -------------------------------------------------------------------------
 // The event loop
 // -------------------------------------------------------------------------
 
@@ -752,10 +841,10 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
     js.sync();
 
     // The last drop's names were promised until now, and the queue that held
-    // them has just been cleared.
-    _ = self.drops.reset(.retain_capacity);
-    self.drop_names = .empty;
-    self.drop_expected = 0;
+    // them has just been cleared. So were the last answer's.
+    _ = self.names.reset(.retain_capacity);
+    self.drop = .{};
+    self.chosen = .{};
 
     while (true) {
         const count = @min(js.drain(&self.records, record_capacity, &self.heap, heap_capacity), record_capacity);
@@ -850,21 +939,21 @@ fn translate(self: *Impl, record: *const wire.Record) void {
             push(self, .{ .preedit = id });
         },
 
-        .drop_begin => {
-            self.drop_names = .empty;
-            self.drop_window = id;
-            self.drop_expected = @intCast(@max(0, record.a));
-        },
+        .drop_begin => self.drop = .begin(id, .none, record.a),
 
         .drop_file => {
-            if (self.drop_expected == 0) return;
-            const arena = self.drops.allocator();
-            const name = arena.dupe(u8, text) catch return pushFailed(self);
-            self.drop_names.append(arena, name) catch return pushFailed(self);
-            if (self.drop_names.items.len < self.drop_expected) return;
+            const last = self.drop.add(self.names.allocator(), text) catch return pushFailed(self);
+            if (last) push(self, .{ .drop = .{ .window = self.drop.window, .paths = self.drop.names.items } });
+        },
 
-            self.drop_expected = 0;
-            push(self, .{ .drop = .{ .window = self.drop_window, .paths = self.drop_names.items } });
+        .dialog_begin => {
+            self.chosen = .begin(id, @enumFromInt(@as(u32, @bitCast(record.b))), record.a);
+            if (self.chosen.expected == 0) pushChosen(self);
+        },
+
+        .dialog_file => {
+            const last = self.chosen.add(self.names.allocator(), text) catch return pushFailed(self);
+            if (last) pushChosen(self);
         },
 
         .surface_lost => {
@@ -941,6 +1030,10 @@ fn push(self: *Impl, ev: event.Event) void {
 
 fn pushFailed(self: *Impl) void {
     self.push_failed = true;
+}
+
+fn pushChosen(self: *Impl) void {
+    push(self, .{ .file_dialog = .{ .window = self.chosen.window, .id = self.chosen.id, .paths = self.chosen.names.items } });
 }
 
 // -------------------------------------------------------------------------
@@ -1328,6 +1421,109 @@ test "a drop is one event with every name in it, valid until the next pump" {
             try testing.expectEqual(@as(?event.Event, null), queue.next());
         }
     }.run);
+}
+
+fn dialogRequest(id: u32, folder: bool) backend.DialogRequest {
+    return .{
+        .id = @enumFromInt(id),
+        .window = @enumFromInt(1),
+        .folder = folder,
+        .multiple = !folder,
+        .title = "ignored",
+        .filters = &.{},
+        .initial_folder = null,
+    };
+}
+
+test "a file dialog is asked of the page, accepting what the filters name" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            _ = .{ native, queue };
+            var request = dialogRequest(3, false);
+            request.filters = &.{
+                .{ .name = "Images", .extensions = &.{ "png", ".jpg" } },
+                .{ .name = "Levels", .extensions = &.{"level.json"} },
+            };
+            try vtable.showFileDialog(impl, testing.allocator, request);
+
+            const asked = stub.page.dialog orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(@as(u32, 1), asked.window);
+            try testing.expectEqual(@as(u32, 3), asked.id);
+            try testing.expectEqual(dialog_flags.multiple, asked.flags);
+            try testing.expectEqualStrings(".png,.jpg,.level.json", asked.accept());
+
+            try testing.expectError(error.Unavailable, vtable.showFileDialog(impl, testing.allocator, dialogRequest(4, true)));
+        }
+    }.run);
+}
+
+test "an answer is one event with every name, beside a drop in the same pump" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            _ = native;
+            try vtable.showFileDialog(impl, testing.allocator, dialogRequest(9, true));
+            try testing.expectEqual(dialog_flags.folder, stub.page.dialog.?.flags);
+            stub.answerDialog(&.{ "assets/level.json", "assets/atlas.png" });
+            stub.queue(.{ .kind = .drop_begin, .window = 1, .a = 1 }, "");
+            stub.queue(.{ .kind = .drop_file, .window = 1, .a = 0 }, "notes.txt");
+            try vtable.pump(impl, queue);
+
+            const answer = queue.next().?.file_dialog;
+            try testing.expectEqual(@as(event.DialogId, @enumFromInt(9)), answer.id);
+            try testing.expectEqual(@as(event.WindowId, @enumFromInt(1)), answer.window);
+            try testing.expectEqual(@as(usize, 2), answer.paths.len);
+            try testing.expectEqualStrings("assets/level.json", answer.paths[0]);
+            try testing.expectEqualStrings("assets/atlas.png", answer.paths[1]);
+
+            const dropped = queue.next().?.drop;
+            try testing.expectEqualStrings("notes.txt", dropped.paths[0]);
+            try testing.expectEqualStrings("assets/atlas.png", answer.paths[1]);
+            try testing.expectEqual(@as(?event.Event, null), queue.next());
+        }
+    }.run);
+}
+
+test "a cancelled dialog is an answer with nothing in it, and frees the page for another" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            _ = native;
+            try vtable.showFileDialog(impl, testing.allocator, dialogRequest(5, false));
+            stub.answerDialog(&.{});
+            try vtable.pump(impl, queue);
+
+            const answer = queue.next().?.file_dialog;
+            try testing.expectEqual(@as(event.DialogId, @enumFromInt(5)), answer.id);
+            try testing.expectEqual(@as(usize, 0), answer.paths.len);
+            try vtable.showFileDialog(impl, testing.allocator, dialogRequest(6, false));
+        }
+    }.run);
+}
+
+test "a chosen file's bytes are what the page read, found by the answer's index" {
+    stub.reset();
+    defer stub.reset();
+    stub.page.chosen = &.{ "level one", "" };
+    const impl = try open(testing.allocator);
+    defer vtable.deinit(impl, testing.allocator);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try vtable.chosenFile(impl, 0, "levels/one.json", &out, testing.allocator);
+    try testing.expectEqualStrings("level one", out.items);
+    out.clearRetainingCapacity();
+    try vtable.chosenFile(impl, 1, "empty.txt", &out, testing.allocator);
+    try testing.expectEqualStrings("", out.items);
+    try testing.expectError(error.Unavailable, vtable.chosenFile(impl, 2, "gone", &out, testing.allocator));
+}
+
+test "a filter that lets anything through leaves the page nothing to filter by" {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try acceptList(testing.allocator, &out, &.{
+        .{ .name = "Images", .extensions = &.{"png"} },
+        .{ .name = "Everything", .extensions = &.{"*"} },
+    });
+    try testing.expectEqualStrings("", out.items);
 }
 
 test "a lost context is the surface going, and a restored one is it coming back" {

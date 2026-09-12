@@ -43,6 +43,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const backend_mod = @import("backend.zig");
+const dialog = @import("dialog.zig");
 const event = @import("event.zig");
 const platform = @import("platform.zig");
 const keys = @import("keys.zig");
@@ -122,6 +123,11 @@ mappings: gamepad_mod.Store = .{},
 /// What `clipboardText` last read, kept so its answer needs no freeing.
 clipboard: std.ArrayListUnmanaged(u8) = .empty,
 
+next_dialog: u32 = 1,
+/// The paths of the last `.file_dialog` answer, kept past the pump it came in
+/// for `chosenFile`.
+chosen: std.ArrayListUnmanaged([]u8) = .empty,
+
 /// Open the windowing system.
 ///
 /// `error.Unsupported` means this build has no backend for the target;
@@ -189,6 +195,8 @@ pub fn deinit(self: *Context) void {
     self.monitor_modes.deinit(self.gpa);
     self.mappings.deinit(self.gpa);
     self.clipboard.deinit(self.gpa);
+    self.forgetChosen();
+    self.chosen.deinit(self.gpa);
     self.queue.deinit();
     self.vtable.deinit(self.impl, self.gpa);
     self.* = undefined;
@@ -243,7 +251,10 @@ pub fn pump(self: *Context) Error!void {
 
     // Walked before anything is handed out, so the state a frame reads always
     // agrees with the events that frame is about to see.
-    for (self.queue.items.items) |ev| self.state.apply(ev);
+    for (self.queue.items.items) |ev| {
+        self.state.apply(ev);
+        if (ev == .file_dialog) try self.keepChosen(ev.file_dialog.paths);
+    }
 }
 
 /// The same, but sleep first until there is something to pump or `timeout_ms`
@@ -418,6 +429,86 @@ pub fn hasClipboardText(self: *Context) bool {
 }
 
 // -------------------------------------------------------------------------
+// File dialogs
+// -------------------------------------------------------------------------
+
+/// Ask for a file - or several, with `multiple` - in the system's own dialog.
+///
+/// Returns at once, and the answer is a `.file_dialog` event with this id: no
+/// paths when nothing was chosen. One dialog at a time; asking while one is
+/// open is `error.Unavailable`, and so is a backend that has no dialog.
+pub fn openFileDialog(self: *Context, options: dialog.FileOptions) Error!event.DialogId {
+    for (options.filters) |filter| {
+        if (!dialog.validFilter(filter)) return error.Unavailable;
+    }
+    return self.showDialog(options.window, .{
+        .folder = false,
+        .multiple = options.multiple,
+        .title = options.title,
+        .filters = options.filters,
+        .initial_folder = options.initial_folder,
+    });
+}
+
+/// Ask for a folder, the same way. On the web the answer names every file in
+/// it instead, since a page is given files and never a folder - see `web`.
+pub fn openFolderDialog(self: *Context, options: dialog.FolderOptions) Error!event.DialogId {
+    return self.showDialog(options.window, .{
+        .folder = true,
+        .multiple = false,
+        .title = options.title,
+        .filters = &.{},
+        .initial_folder = options.initial_folder,
+    });
+}
+
+fn showDialog(self: *Context, parent: ?Window, wanted: backend_mod.DialogRequest) Error!event.DialogId {
+    var request = wanted;
+    if (request.title) |title| {
+        if (!std.unicode.utf8ValidateSlice(title)) return error.Unavailable;
+    }
+    if (request.initial_folder) |folder| {
+        if (!std.unicode.wtf8ValidateSlice(folder)) return error.Unavailable;
+    }
+    if (parent) |win| {
+        request.owner = (self.entry(win.id) orelse return error.Unavailable).native;
+        request.window = win.id;
+    }
+    request.id = @enumFromInt(self.next_dialog);
+
+    try self.vtable.showFileDialog(self.impl, self.gpa, request);
+    self.next_dialog = @max(1, self.next_dialog +% 1);
+    return request.id;
+}
+
+/// The bytes of the `index`th file of the last `.file_dialog` answer, read
+/// into memory from `gpa`. The caller frees them.
+///
+/// The one way to read an answer that works everywhere: on the desktop the
+/// paths are paths and this reads them, while on the web and on Android they
+/// are names, and the bytes come from the page or the system - see `web` and
+/// the README. `error.Unavailable` for an index past the end, for a folder,
+/// and for a file that cannot be read.
+pub fn chosenFile(self: *Context, index: usize, gpa: Allocator) Error![]u8 {
+    if (index >= self.chosen.items.len) return error.Unavailable;
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try self.vtable.chosenFile(self.impl, index, self.chosen.items[index], &out, gpa);
+    return out.toOwnedSlice(gpa);
+}
+
+fn keepChosen(self: *Context, paths: []const []const u8) Allocator.Error!void {
+    self.forgetChosen();
+    try self.chosen.ensureTotalCapacity(self.gpa, paths.len);
+    for (paths) |path| self.chosen.appendAssumeCapacity(try self.gpa.dupe(u8, path));
+}
+
+fn forgetChosen(self: *Context) void {
+    for (self.chosen.items) |path| self.gpa.free(path);
+    self.chosen.clearRetainingCapacity();
+}
+
+// -------------------------------------------------------------------------
 // Gamepads
 // -------------------------------------------------------------------------
 
@@ -570,6 +661,35 @@ test "a backend this build has not got is refused by name" {
         error.Unsupported,
         Context.init(testing.allocator, .{ .select = .{ .only = absent } }),
     );
+}
+
+test "a backend with no dialog refuses one, and so does a window that is not there" {
+    var ctx = try Context.init(testing.allocator, .{ .select = .{ .only = .none } });
+    defer ctx.deinit();
+
+    try testing.expectError(error.Unavailable, ctx.openFileDialog(.{ .multiple = true }));
+    try testing.expectError(error.Unavailable, ctx.openFolderDialog(.{ .title = "Project" }));
+    try testing.expectError(error.Unavailable, ctx.openFileDialog(.{ .window = .{ .ctx = &ctx, .id = @enumFromInt(9) } }));
+    try testing.expectError(error.Unavailable, ctx.openFileDialog(.{ .title = "\xFF" }));
+    try testing.expectError(error.Unavailable, ctx.chosenFile(0, testing.allocator));
+}
+
+test "an answer's paths outlive its pump, for reading afterwards" {
+    var ctx = try Context.init(testing.allocator, .{ .select = .{ .only = .none } });
+    defer ctx.deinit();
+
+    try ctx.queue.push(.{ .file_dialog = .{ .window = .none, .id = @enumFromInt(1), .paths = &.{ "a.png", "b.png" } } });
+    for (ctx.queue.items.items) |ev| {
+        if (ev == .file_dialog) try ctx.keepChosen(ev.file_dialog.paths);
+    }
+    ctx.queue.clear();
+    try testing.expectEqual(@as(usize, 2), ctx.chosen.items.len);
+    try testing.expectEqualStrings("b.png", ctx.chosen.items[1]);
+    try testing.expectError(error.Unavailable, ctx.chosenFile(1, testing.allocator));
+    try testing.expectError(error.Unavailable, ctx.chosenFile(2, testing.allocator));
+
+    try ctx.keepChosen(&.{"c.png"});
+    try testing.expectEqual(@as(usize, 1), ctx.chosen.items.len);
 }
 
 test "an id names one window forever, even after it is destroyed" {

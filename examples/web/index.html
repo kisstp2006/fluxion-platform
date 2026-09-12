@@ -139,7 +139,7 @@
       const webgl = new Fluxion(canvas, { attributes: { stencil: true } });
 
       say(`${module}  ${webgl.isWebGL2 ? "WebGL 2" : "WebGL 1"}  ` +
-        `JSPI ${Platform.jspi ? "yes" : "no"}  - click the canvas, then try F, L, T, M`);
+        `JSPI ${Platform.jspi ? "yes" : "no"}  - click the canvas, then try F, L, T, M, O`);
 
       try {
         await platform.run(`./${module}`, { with: [webgl] });

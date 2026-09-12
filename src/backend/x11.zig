@@ -42,6 +42,7 @@ const platform = @import("../platform.zig");
 const evdev = @import("evdev.zig");
 const cursor_mod = @import("../cursor.zig");
 const clipboard = @import("clipboard.zig");
+const linux_dialog = @import("linux_dialog.zig");
 
 const Error = platform.Error;
 
@@ -852,6 +853,11 @@ const Impl = struct {
     /// takes the clipboard.
     clipboard_text: std.ArrayListUnmanaged(u8) = .empty,
     owns_clipboard: bool = false,
+
+    /// The file dialog that is open, whose end `pump` looks for.
+    dialog: ?*linux_dialog.Dialog = null,
+    /// What the last dialog's answer carried, kept until the next pump.
+    answers: std.heap.ArenaAllocator,
 };
 
 /// The window that owns what this program copies and receives what it pastes,
@@ -955,6 +961,8 @@ pub const vtable: backend.Vtable = .{
     .setClipboardText = setClipboardText,
     .clipboardText = clipboardText,
     .hasClipboardText = hasClipboardText,
+    .showFileDialog = showFileDialog,
+    .chosenFile = chosenFile,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -1009,6 +1017,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .net_wm_state_fullscreen = x.XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", 0),
         .net_workarea = x.XInternAtom(display, "_NET_WORKAREA", 0),
         .scale = readScale(x, display),
+        .answers = .init(gpa),
     };
 
     // The input method reads the locale, and one that was never given a
@@ -1047,6 +1056,12 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
 
 fn deinit(impl: backend.Impl, gpa: Allocator) void {
     const self = cast(impl);
+    // Before the wake pipe, which the dialog's thread writes to as it ends.
+    if (self.dialog) |job| {
+        job.cancel();
+        job.destroy();
+    }
+    self.answers.deinit();
     if (self.selection) |*selection| {
         handOver(self, selection);
         _ = self.x.XDestroyWindow(self.display, selection.window);
@@ -1221,6 +1236,10 @@ fn setUndecorated(self: *Impl, window: Window) void {
 fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindow) void {
     const self = cast(impl);
     const win = castWindow(native);
+
+    if (self.dialog) |job| {
+        if (job.request.window == win.id) job.cancel();
+    }
 
     // Both before the window: a context outliving its drawable and a colormap
     // outliving the window that used it are each a handle into nothing.
@@ -2140,6 +2159,9 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
     const self = cast(impl);
 
     if (comptime has_display) drainWake(self);
+    // The last answer's paths were promised until now.
+    _ = self.answers.reset(.retain_capacity);
+    try answerDialog(self, queue);
 
     var pending = self.x.XPending(self.display);
     while (pending > 0) : (pending -= 1) {
@@ -2604,6 +2626,36 @@ fn hasClipboardText(impl: backend.Impl) bool {
         if (target == self.utf8_string or target == selection.utf8_mime or target == xa_string) return true;
     }
     return false;
+}
+
+/// X11 has no dialog of its own: the desktop's portal is asked, or zenity or
+/// kdialog - see `linux_dialog`. The portal is told the window by its id, so
+/// it can put the dialog in front of it.
+fn showFileDialog(impl: backend.Impl, gpa: Allocator, request: backend.DialogRequest) Error!void {
+    if (comptime !has_display or builtin.single_threaded) return error.Unavailable;
+    const self = cast(impl);
+    if (self.dialog != null) return error.Unavailable;
+    var parent: [32]u8 = undefined;
+    const handle = if (request.owner) |native|
+        std.fmt.bufPrint(&parent, "x11:{x}", .{castWindow(native).window}) catch ""
+    else
+        "";
+    self.dialog = try linux_dialog.Dialog.start(gpa, request, handle, self.wake[1]);
+}
+
+fn chosenFile(impl: backend.Impl, index: usize, path: []const u8, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    _ = .{ impl, index };
+    if (comptime !has_display) return error.Unavailable;
+    return linux_dialog.readFile(path, out, gpa);
+}
+
+fn answerDialog(self: *Impl, queue: *backend.Queue) Error!void {
+    const job = self.dialog orelse return;
+    if (!job.finished()) return;
+    self.dialog = null;
+    defer job.destroy();
+    const paths = try job.paths(self.answers.allocator());
+    try queue.push(.{ .file_dialog = .{ .window = job.request.window, .id = job.request.id, .paths = paths } });
 }
 
 /// Ask the clipboard's owner for its contents as `target`, wait, and append

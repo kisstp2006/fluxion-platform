@@ -28,6 +28,7 @@
 //!   T  type into the canvas, through the input method; escape stops
 //!   M  fill the page, and give the space back
 //!   C  the next cursor shape, and H hides it
+//!   O  choose files, and D a folder - the names and the bytes arrive later
 //!
 //! and ctrl+C to copy what was typed, ctrl+V to paste - the program's own
 //! shortcuts, which a page hears as keys the way a desktop does. The paste
@@ -103,7 +104,7 @@ fn start() !void {
             mon.*, mon.scale_x, mon.work_area.width, mon.work_area.height,
         });
     }
-    std.log.info("F fullscreen, L lock the pointer, R raw motion, T type, M fill the page, C cursor, H hide it", .{});
+    std.log.info("F fullscreen, L lock the pointer, R raw motion, T type, M fill the page, C cursor, H hide it, O open files, D a folder", .{});
     marker = .{ @floatFromInt(size[0] / 2), @floatFromInt(size[1] / 2) };
 }
 
@@ -200,6 +201,18 @@ fn handle(ev: platform.Event) void {
             }
         },
 
+        .file_dialog => |d| {
+            if (d.paths.len == 0) std.log.info("dialog   {d}: nothing chosen", .{@intFromEnum(d.id)});
+            for (d.paths, 0..) |name, index| {
+                if (ctx.chosenFile(index, gpa)) |bytes| {
+                    defer gpa.free(bytes);
+                    std.log.info("chosen   {s}, {d} bytes, starting {x}", .{ name, bytes.len, bytes[0..@min(bytes.len, 8)] });
+                } else |err| {
+                    std.log.info("chosen   {s}, unreadable: {t}", .{ name, err });
+                }
+            }
+        },
+
         .gamepad_connected => |index| {
             const pad = ctx.gamepad(index) orelse return;
             std.log.info("gamepad  {d} connected: {f}", .{ index, pad.* });
@@ -258,6 +271,14 @@ fn command(key: platform.Key) void {
             const wanted: platform.CursorMode = if (win.cursorMode() == .hidden) .normal else .hidden;
             win.setCursorMode(wanted) catch {};
             std.log.info("cursor mode {t}", .{wanted});
+        },
+        .o => {
+            const id = ctx.openFileDialog(.{ .window = win, .multiple = true }) catch |err| return std.log.warn("file dialog: {t}", .{err});
+            std.log.info("dialog   {d} asked for: files", .{@intFromEnum(id)});
+        },
+        .d => {
+            const id = ctx.openFolderDialog(.{ .window = win }) catch |err| return std.log.warn("folder dialog: {t}", .{err});
+            std.log.info("dialog   {d} asked for: a folder", .{@intFromEnum(id)});
         },
         else => {},
     }

@@ -5,6 +5,7 @@
 //! Opens one, prints what happens to it, and closes on escape or on the window
 //! button. `--frames N` closes after N pumps instead, so that
 //! `zig build examples` finishes on its own rather than waiting for a person.
+//! O and D open the system's file and folder dialogs.
 //!
 //! This is the shape of a frame loop: pump once, drain the queue, draw. There
 //! is no callback anywhere, and the `switch` is exhaustive over what this
@@ -53,6 +54,24 @@ fn fullscreenKey(
     }
 }
 
+/// o asks for files and d for a folder, in the system's own dialog. The
+/// answer is an event some frames later; the loop does not stop for it.
+fn dialogKey(ctx: *platform.Context, win: platform.Window, key: platform.Key, out: *Io.Writer) !void {
+    const id = switch (key) {
+        .o => try ctx.openFileDialog(.{
+            .window = win,
+            .multiple = true,
+            .filters = &.{
+                .{ .name = "Images", .extensions = &.{ "png", "jpg" } },
+                .{ .name = "Everything", .extensions = &.{"*"} },
+            },
+        }),
+        .d => try ctx.openFolderDialog(.{ .window = win }),
+        else => return,
+    };
+    try out.print("       dialog {d} open\n", .{@intFromEnum(id)});
+}
+
 pub fn main(init: std.process.Init) !void {
     var stdout_buffer: [4096]u8 = undefined;
     var stdout: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
@@ -80,7 +99,8 @@ pub fn main(init: std.process.Init) !void {
     const scale = win.contentScale();
     try out.print("{t}: {d}x{d} px, scale {d:.2}\n", .{ ctx.backend(), fb[0], fb[1], scale[0] });
     try out.writeAll("escape or the window button closes it\n");
-    try out.writeAll("f11 fills the monitor, f10 switches its mode, f9 gives it back\n\n");
+    try out.writeAll("f11 fills the monitor, f10 switches its mode, f9 gives it back\n");
+    try out.writeAll("o opens files, d a folder\n\n");
     try out.flush();
 
     var frames: u32 = 0;
@@ -101,6 +121,20 @@ pub fn main(init: std.process.Init) !void {
                 if (k.action == .press) fullscreenKey(&ctx, win, k.key, out) catch |err| {
                     try out.print("       fullscreen: {t}\n", .{err});
                 };
+                if (k.action == .press) dialogKey(&ctx, win, k.virtual, out) catch |err| {
+                    try out.print("       dialog: {t}\n", .{err});
+                };
+            },
+
+            .file_dialog => |d| {
+                try out.print("dialog {d}: {d} chosen\n", .{ @intFromEnum(d.id), d.paths.len });
+                for (d.paths, 0..) |path, index| {
+                    // The one way to read a choice that works on every platform;
+                    // a folder has no bytes of its own to read.
+                    if (ctx.chosenFile(index, gpa)) |bytes| {
+                        try out.print("       {s} ({d} bytes)\n", .{ path, bytes.len });
+                    } else |_| try out.print("       {s}\n", .{path});
+                }
             },
 
             .char => |c| {

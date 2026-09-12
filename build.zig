@@ -44,6 +44,13 @@ pub fn build(b: *std.Build) void {
     const web_glue = b.path("src/backend/web.js");
     b.addNamedLazyPath("fluxion-platform.js", web_glue);
 
+    // The one piece of Java: the activity an Android app names in its
+    // manifest to have a file dialog. Named like the glue, for an app's own
+    // build to compile; `zig build android-dex` does it here.
+    const activity_java = b.path("src/backend/android/FluxionActivity.java");
+    b.addNamedLazyPath("FluxionActivity.java", activity_java);
+    addAndroidDex(b, activity_java);
+
     // zig build test
     const tests = b.addTest(.{
         .name = "fluxion-platform-tests",
@@ -98,6 +105,10 @@ pub fn build(b: *std.Build) void {
                 \\    ctx.pump() catch {};
                 \\    if (platform.web.droppedFile(&ctx, 0, std.heap.wasm_allocator)) |bytes| {
                 \\        std.log.info("{d} dropped bytes", .{bytes.len});
+                \\        std.heap.wasm_allocator.free(bytes);
+                \\    } else |_| {}
+                \\    _ = ctx.openFileDialog(.{ .window = win, .multiple = true }) catch {};
+                \\    if (ctx.chosenFile(0, std.heap.wasm_allocator)) |bytes| {
                 \\        std.heap.wasm_allocator.free(bytes);
                 \\    } else |_| {}
                 \\}
@@ -261,6 +272,34 @@ pub fn build(b: *std.Build) void {
         });
         test_step.dependOn(&b.addRunArtifact(example_tests).step);
     }
+}
+
+/// `FluxionActivity` as `zig-out/android/classes.dex`, with the JDK's `javac`
+/// and the SDK's `d8`. Only when asked for: nothing else here needs Java.
+fn addAndroidDex(b: *std.Build, source: std.Build.LazyPath) void {
+    const step = b.step("android-dex", "FluxionActivity as zig-out/android/classes.dex, for an APK (needs a JDK and the Android SDK)");
+    const sdk = b.option([]const u8, "android-sdk", "The Android SDK, for android-dex (default: ANDROID_HOME, then ANDROID_SDK_ROOT)") orelse
+        b.graph.environ_map.get("ANDROID_HOME") orelse
+        b.graph.environ_map.get("ANDROID_SDK_ROOT") orelse {
+        step.dependOn(&b.addFail("android-dex needs the Android SDK: -Dandroid-sdk=<path>, or ANDROID_HOME").step);
+        return;
+    };
+    const platform_version = b.option([]const u8, "android-platform", "The SDK platform android-dex compiles against") orelse "android-35";
+    const build_tools = b.option([]const u8, "android-build-tools", "The SDK build-tools version android-dex takes d8 from") orelse "36.0.0";
+    const android_jar = b.pathJoin(&.{ sdk, "platforms", platform_version, "android.jar" });
+    const d8 = b.pathJoin(&.{ sdk, "build-tools", build_tools, if (@import("builtin").os.tag == .windows) "d8.bat" else "d8" });
+
+    const javac = b.addSystemCommand(&.{ "javac", "--release", "11", "-classpath", android_jar, "-d" });
+    const classes = javac.addOutputDirectoryArg("classes");
+    javac.addFileArg(source);
+
+    // One class file, because the Java has lambdas and no inner classes: `d8`
+    // takes files and not directories, and so knows this one by name.
+    const dex = b.addSystemCommand(&.{ d8, "--release", "--min-api", "29", "--lib", android_jar, "--output" });
+    const out = dex.addOutputDirectoryArg("dex");
+    dex.addFileArg(classes.path(b, "dev/fluxion/platform/FluxionActivity.class"));
+
+    step.dependOn(&b.addInstallFile(out.path(b, "classes.dex"), "android/classes.dex").step);
 }
 
 const WebExamples = struct {

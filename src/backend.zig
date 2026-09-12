@@ -16,6 +16,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const cursor = @import("cursor.zig");
+const dialog = @import("dialog.zig");
 const event = @import("event.zig");
 const monitor = @import("monitor.zig");
 const gamepad = @import("gamepad.zig");
@@ -66,6 +67,20 @@ pub const WindowState = enum {
     focused,
     /// The gentler version: ask to be noticed, and let the system decide how.
     attention,
+};
+
+/// A file or folder dialog, as a backend is asked for one. See `dialog` for
+/// the documented form; the context has checked every string in it.
+pub const DialogRequest = struct {
+    id: event.DialogId = .none,
+    /// The window it belongs to, and that window's id for the answer.
+    owner: ?NativeWindow = null,
+    window: event.WindowId = .none,
+    folder: bool,
+    multiple: bool,
+    title: ?[]const u8,
+    filters: []const dialog.Filter,
+    initial_folder: ?[]const u8,
 };
 
 /// The limits a window may not be resized past. Zero means no limit on that
@@ -278,6 +293,23 @@ pub const Vtable = struct {
 
     /// Whether the clipboard holds text, asked without reading it.
     hasClipboardText: *const fn (impl: Impl) bool,
+
+    /// Open the system's file or folder dialog, and return without waiting
+    /// for it. A later `pump` pushes the answer as `.file_dialog` - always,
+    /// with no paths when nothing was chosen - and until then another is
+    /// refused with `error.Unavailable`.
+    showFileDialog: *const fn (impl: Impl, gpa: Allocator, request: DialogRequest) Error!void,
+
+    /// Append the bytes of the `index`th file of the last answer, whose path
+    /// in that answer was `path`. A backend whose answers are paths reads the
+    /// path; one whose answers are names reads what it kept of the choice.
+    chosenFile: *const fn (
+        impl: Impl,
+        index: usize,
+        path: []const u8,
+        out: *std.ArrayListUnmanaged(u8),
+        gpa: Allocator,
+    ) Error!void,
 
     /// The windowing system's own handle, as a number.
     ///

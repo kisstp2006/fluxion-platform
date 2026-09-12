@@ -60,6 +60,8 @@ pub const vtable: backend.Vtable = .{
     .setClipboardText = setClipboardText,
     .clipboardText = clipboardText,
     .hasClipboardText = hasClipboardText,
+    .showFileDialog = showFileDialog,
+    .chosenFile = chosenFile,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -184,6 +186,16 @@ fn clipboardText(impl: backend.Impl, out: *std.ArrayListUnmanaged(u8), gpa: Allo
 fn hasClipboardText(impl: backend.Impl) bool {
     _ = impl;
     return false;
+}
+
+fn showFileDialog(impl: backend.Impl, gpa: Allocator, request: backend.DialogRequest) Error!void {
+    _ = .{ impl, gpa, request };
+    return error.Unavailable;
+}
+
+fn chosenFile(impl: backend.Impl, index: usize, path: []const u8, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    _ = .{ impl, index, path, out, gpa };
+    return error.Unavailable;
 }
 
 /// Nothing to draw into, so nothing to draw with. Every one of these refuses

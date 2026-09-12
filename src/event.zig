@@ -166,6 +166,23 @@ pub const DropEvent = struct {
     paths: []const []const u8,
 };
 
+/// Which file dialog an answer belongs to: the id `Context.openFileDialog`
+/// or `Context.openFolderDialog` returned.
+pub const DialogId = enum(u32) {
+    none = 0,
+    _,
+};
+
+/// The answer to a file or folder dialog. The paths belong to the library and
+/// are valid until the next `pump`; copy anything you keep.
+pub const FileDialogEvent = struct {
+    /// The window the dialog was opened over, or `.none`.
+    window: WindowId,
+    id: DialogId,
+    /// Absolute paths - names, on the web - and none when nothing was chosen.
+    paths: []const []const u8,
+};
+
 /// A new drawing surface exists. Android only.
 pub const SurfaceEvent = struct {
     window: WindowId,
@@ -203,6 +220,7 @@ pub const Event = union(enum) {
     cursor: CursorEvent,
     scroll: ScrollEvent,
     drop: DropEvent,
+    file_dialog: FileDialogEvent,
 
     /// Android: the drawing surface has gone. Release everything that points at
     /// it - swapchain, framebuffers, the EGL surface - before returning from
@@ -274,6 +292,7 @@ test "every event says which window it is about" {
         .mods = .none,
     } }).window());
     try testing.expectEqual(id, (Event{ .scale = .{ .window = id, .x = 2, .y = 2 } }).window());
+    try testing.expectEqual(id, (Event{ .file_dialog = .{ .window = id, .id = @enumFromInt(1), .paths = &.{} } }).window());
 }
 
 test "the process-wide events belong to no window" {
@@ -300,6 +319,7 @@ test "a switch over events compiles for every case" {
         .cursor => "cursor",
         .scroll => "scroll",
         .drop => "drop",
+        .file_dialog => "file dialog",
         .surface_lost, .surface_created => "surface",
         .preedit => "preedit",
         .suspended, .resumed, .low_memory => "lifecycle",

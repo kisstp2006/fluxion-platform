@@ -16,6 +16,7 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `gl` | Asking a window for an OpenGL context, and driving the one it gives back. |
 | `vulkan` | Which instance extensions this session needs, and turning a window into a surface. |
 | `text` | The text a keyboard actually produces, and the input method between the two. |
+| `dialog` | Asking the user for files or a folder, in the system's own dialog. |
 | `web` | What a browser build needs and `std` cannot give it: a console, a panic that says what it was, and the bytes of a dropped file. |
 | `backend` | What a windowing system has to answer to — the seam a new backend is written against. |
 
@@ -28,11 +29,11 @@ all.
 
 | Backend | State |
 | --- | --- |
-| `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition, clipboard |
-| `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard |
-| `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard |
-| `android` | Activity lifecycle, surface create and loss, focus, keys, touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard |
-| `web` | Canvas, both loop models, keyboard, text and composition, mouse, touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard |
+| `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition, clipboard, file and folder dialogs |
+| `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard, file and folder dialogs |
+| `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard, file and folder dialogs |
+| `android` | Activity lifecycle, surface create and loss, focus, keys, touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard, file and folder dialogs (with `FluxionActivity`) |
+| `web` | Canvas, both loop models, keyboard, text and composition, mouse, touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard, file and folder dialogs |
 | `none` | Compiles and runs everywhere, makes no windows |
 
 On Linux `auto` opens Wayland where there is a compositor and falls through to
@@ -272,6 +273,73 @@ text field, so it is inserted once, by the program, as it would be anywhere
 else; a paste from the browser's own menu still types into the field.
 Writing may want a key press or a click first, in Firefox and Safari, and is
 tried again inside the next one.
+
+## Files and folders come from the system's dialog
+
+```zig
+const asked = try ctx.openFileDialog(.{
+    .window = win,
+    .multiple = true,
+    .filters = &.{.{ .name = "Scenes", .extensions = &.{ "scene", "json" } }},
+});
+_ = try ctx.openFolderDialog(.{ .window = win, .title = "Open project" });
+
+switch (ev) {
+    .file_dialog => |d| if (d.id == asked) for (d.paths, 0..) |path, i| {
+        const bytes = try ctx.chosenFile(i, gpa); // or open `path` yourself, on a desktop
+        defer gpa.free(bytes);
+        try load(path, bytes);
+    },
+    else => {},
+}
+```
+
+**The call does not wait.** It hands back an id at once, and the answer is a
+`.file_dialog` event some frames later with that id and the paths - none when
+the user cancelled. The loop goes on while the dialog is open, so the window
+keeps drawing and its events keep coming, and a program asks the same way on
+every platform, including the ones that could not wait for a dialog if they
+wanted to. The paths are the library's until the next `pump`, like a drop's.
+
+**A path is not always a path.** On the desktop it is one, and a folder answers
+with itself. A page and an Android app are handed documents rather than paths,
+so there the answer names them - a folder answers with every file inside it,
+named by its path in the folder - and `ctx.chosenFile` has the bytes. It works
+on the desktop too, reading the path, so the loop above is the same everywhere.
+
+**One at a time.** Asking while a dialog is open is `error.Unavailable`, and
+so is a filter that some system would read differently: an extension is
+`"png"` or `".png"`, never `"*.png"` or `"png;jpg"`, and `"*"` lets any file
+through.
+
+| | files | a folder | worth knowing |
+| --- | --- | --- | --- |
+| `win32` | `IFileOpenDialog`, several with `multiple` | the same, picking folders | on a thread of its own and modal over the window, which is disabled meanwhile; paths are WTF-8, which is what Zig's file functions take; a dialog still open when its window or the context goes is closed as Cancel |
+| `x11`, `wayland` | the desktop portal's `FileChooser`, over D-Bus | the same, with `directory` | on a thread of its own; told the window as `x11:<id>`, or on Wayland through xdg-foreign where the compositor has it; with no portal, zenity or kdialog (KDE first on KDE); closed through `Request.Close` when its window or the context goes |
+| `android` | the system's document picker, `ACTION_OPEN_DOCUMENT` | `ACTION_OPEN_DOCUMENT_TREE`, every file inside | names, never paths; needs `FluxionActivity` in the manifest - see below; a filter is MIME types, and an extension Android has no type for lets everything through |
+| `web` | an `<input type="file">` | `webkitdirectory`, every file inside | names, never paths; opened inside a click or a key press - the next one, if none has just happened; no title and no folder to start in |
+
+**On Android the dialog needs one Java class.** A `NativeActivity` never hands
+`onActivityResult` to native code, and the document picker answers nowhere
+else, so this library carries `FluxionActivity`: a `NativeActivity` with that
+one method. An app names it in its manifest and packs it into its APK:
+
+```xml
+<application android:hasCode="true" ...>
+    <activity android:name="dev.fluxion.platform.FluxionActivity" ...>
+        <meta-data android:name="android.app.lib_name" android:value="yourlib" />
+```
+
+```bash
+zig build android-dex -Dandroid-sdk=<sdk>   # zig-out/android/classes.dex; ANDROID_HOME works too
+aapt add app.apk classes.dex                # beside lib/<abi>/libyourlib.so, before zipalign
+```
+
+An app still on `android.app.NativeActivity` runs as before, and its dialog is
+`error.Unavailable`. The Java side answers even an activity the system rebuilt
+while the picker was open - which a low-memory phone does - and the answer is
+let go there rather than crashing it. A package that builds its own APK can
+compile the source itself: it is `b.dependency(...).namedLazyPath("FluxionActivity.java")`.
 
 ## Drawing: a context, or a surface, and nothing after that
 
@@ -544,7 +612,11 @@ a program gets one last turn to hear that they are about to.
 method and a soft keyboard attach only to something editable and a canvas is
 not. With it off, `.char` comes straight from the keyboard as on a desktop.
 Dropped files arrive as `.drop` with names rather than paths — a page never
-sees a path — and `platform.web.droppedFile` hands over the bytes.
+sees a path — and `platform.web.droppedFile` hands over the bytes. A file
+dialog's answer is the same, with `ctx.chosenFile`; the glue reads the files
+before the answer arrives, a whole folder only as far as its `maxChosenBytes`
+goes (256 MB unless the page says otherwise), and a file past that is named
+but not read.
 
 Controllers need no mapping file in the common case, for the same reason as
 everywhere else: a browser that recognises a pad says `mapping: "standard"` and
@@ -606,11 +678,12 @@ window handle pointing at where it used to be. Keep it where it was made.
 
 ```bash
 zig build example          # what this machine's windowing is, opening nothing
-zig build example-window   # a window, and every event it produces
+zig build example-window   # a window, every event it produces, and the file dialogs
 zig build example-gl       # an OpenGL context, clearing to a colour that moves
 zig build example-text     # typing, the difference between a key and a letter, and the clipboard
 zig build example-vulkan   # an instance from fluxion-vulkan, and the surface made from a window
 zig build example-web      # the browser examples, into zig-out/web
+zig build android-dex      # FluxionActivity for an APK, into zig-out/android
 ```
 
 The second takes `--frames N` so a run ends on its own.
@@ -648,6 +721,16 @@ The clipboard is read on a real backend but never written: a test run that
 replaced whatever the person running it had copied would be a nuisance. The
 writing is checked against the web backend's fake page, the conversions on
 every host, and the rest by `example-text`.
+
+No test shows a file dialog, for the same reason. The Windows one is taken up
+to the moment it would be shown and abandoned there - which still makes the
+COM object and calls every method before `Show`, whose places in its table a
+test counts against the header - and its empty answer comes out of a real
+pump. The web one is checked against the fake page. What Linux says to the
+portal and to zenity and kdialog is bytes and strings, checked on every host
+down to the D-Bus alignment, and so are the JNI slots and the methods the Java
+and the Zig halves of `FluxionActivity` expect of each other. O and D in
+`example-window` and `example-web` open the real ones.
 
 The web backend runs its tests on every host, against a page that is not
 there: `web_stub.zig` answers every import the browser would, and a test

@@ -105,6 +105,24 @@ pub const Page = struct {
     clipboard_len: ?usize = null,
     /// Whether the page has any way at all to write the clipboard.
     clipboard_api: bool = true,
+
+    /// The file dialog the backend asked for, until `answerDialog`.
+    dialog: ?Dialog = null,
+    /// The files of the last answer, as the glue would have read them.
+    chosen: []const []const u8 = &.{},
+};
+
+/// A file dialog, as `openFileDialog` was asked for it.
+pub const Dialog = struct {
+    window: u32,
+    id: u32,
+    flags: u32,
+    accept_bytes: [256]u8 = undefined,
+    accept_len: usize = 0,
+
+    pub fn accept(self: *const Dialog) []const u8 {
+        return self.accept_bytes[0..self.accept_len];
+    }
 };
 
 pub var page: Page = .{};
@@ -128,6 +146,17 @@ pub fn queue(record: wire.Record, text: []const u8) void {
 
     page.pending[page.pending_count] = copy;
     page.pending_count += 1;
+}
+
+/// The user chose `names` in the open dialog - none is cancelling it - and the
+/// glue queued the answer.
+pub fn answerDialog(names: []const []const u8) void {
+    const asked = page.dialog orelse return;
+    page.dialog = null;
+    queue(.{ .kind = .dialog_begin, .window = asked.window, .a = @intCast(names.len), .b = @bitCast(asked.id) }, "");
+    for (names, 0..) |name, index| {
+        queue(.{ .kind = .dialog_file, .window = asked.window, .a = @intCast(index) }, name);
+    }
 }
 
 /// Somebody pasted, which is when a page learns what the clipboard holds.
@@ -419,6 +448,28 @@ pub fn clipboardRead(ptr: [*]u8, len: u32) u32 {
     const known = page.clipboard_len orelse return 0;
     const kept = @min(len, known);
     @memcpy(ptr[0..kept], page.clipboard[0..kept]);
+    return @intCast(kept);
+}
+
+pub fn openFileDialog(window: u32, id: u32, flags: u32, accept_ptr: [*]const u8, accept_len: u32) u32 {
+    if (page.dialog != null) return 0;
+    var asked: Dialog = .{ .window = window, .id = id, .flags = flags };
+    asked.accept_len = @min(accept_len, asked.accept_bytes.len);
+    @memcpy(asked.accept_bytes[0..asked.accept_len], accept_ptr[0..asked.accept_len]);
+    page.dialog = asked;
+    return 1;
+}
+
+pub fn chosenSize(index: u32) i32 {
+    if (index >= page.chosen.len) return -1;
+    return @intCast(page.chosen[index].len);
+}
+
+pub fn chosenRead(index: u32, ptr: [*]u8, len: u32) u32 {
+    if (index >= page.chosen.len) return 0;
+    const file = page.chosen[index];
+    const kept = @min(len, file.len);
+    @memcpy(ptr[0..kept], file[0..kept]);
     return @intCast(kept);
 }
 

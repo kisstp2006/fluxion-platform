@@ -54,6 +54,7 @@ const evdev = @import("evdev.zig");
 const virtual_key = @import("virtual_key.zig");
 const cursor_mod = @import("../cursor.zig");
 const clipboard = @import("clipboard.zig");
+const linux_dialog = @import("linux_dialog.zig");
 
 const Error = platform.Error;
 
@@ -166,7 +167,17 @@ const Wayland = struct {
     wl_proxy_destroy: *const fn (*Proxy) callconv(.c) void,
     wl_proxy_get_version: *const fn (*Proxy) callconv(.c) u32,
     wl_proxy_get_user_data: *const fn (*Proxy) callconv(.c) ?*anyopaque,
+
+    /// A queue of one's own, to wait for one object's answer without running
+    /// every other listener outside a pump. Optional: without them a file
+    /// dialog is only not held in front of its window.
+    wl_display_create_queue: ?*const fn (*WlDisplay) callconv(.c) ?*WlEventQueue = null,
+    wl_display_roundtrip_queue: ?*const fn (*WlDisplay, *WlEventQueue) callconv(.c) c_int = null,
+    wl_proxy_set_queue: ?*const fn (*Proxy, ?*WlEventQueue) callconv(.c) void = null,
+    wl_event_queue_destroy: ?*const fn (*WlEventQueue) callconv(.c) void = null,
 };
+
+const WlEventQueue = opaque {};
 
 /// The core protocol's descriptors, which live inside the library.
 ///
@@ -477,6 +488,48 @@ fn buildPointerInterfaces(core: CoreInterfaces) void {
     };
 }
 
+// From `unstable/xdg-foreign/xdg-foreign-unstable-v2.xml`: the handle another
+// program - the desktop portal - names this window by, to put its dialog in
+// front of it.
+var exporter_interface: WlInterface = undefined;
+var exported_interface: WlInterface = undefined;
+var foreign_types: [3]?*const WlInterface = @splat(null);
+var exporter_requests: [2]WlMessage = undefined;
+var exported_requests: [1]WlMessage = undefined;
+var exported_events: [1]WlMessage = undefined;
+
+const exporter_destroy: u32 = 0;
+const exporter_export_toplevel: u32 = 1;
+const exported_destroy: u32 = 0;
+
+fn buildForeignInterfaces(core: CoreInterfaces) void {
+    foreign_types = .{ &exported_interface, core.wl_surface_interface, null };
+    const none: [*]const ?*const WlInterface = @ptrCast(&foreign_types[2]);
+
+    exporter_requests = .{
+        .{ .name = "destroy", .signature = "", .types = none },
+        .{ .name = "export_toplevel", .signature = "no", .types = @ptrCast(&foreign_types[0]) },
+    };
+    exporter_interface = .{
+        .name = "zxdg_exporter_v2",
+        .version = 1,
+        .method_count = exporter_requests.len,
+        .methods = &exporter_requests,
+        .event_count = 0,
+        .events = null,
+    };
+    exported_requests = .{.{ .name = "destroy", .signature = "", .types = none }};
+    exported_events = .{.{ .name = "handle", .signature = "s", .types = none }};
+    exported_interface = .{
+        .name = "zxdg_exported_v2",
+        .version = 1,
+        .method_count = exported_requests.len,
+        .methods = &exported_requests,
+        .event_count = exported_events.len,
+        .events = &exported_events,
+    };
+}
+
 var wm_base_requests: [4]WlMessage = undefined;
 var wm_base_events: [1]WlMessage = undefined;
 var xdg_surface_requests: [5]WlMessage = undefined;
@@ -677,6 +730,17 @@ const Impl = struct {
     /// The serial of the last key or click, which a request for the clipboard
     /// has to name.
     input_serial: u32 = 0,
+
+    /// The file dialog that is open, whose end `pump` looks for.
+    dialog: ?*linux_dialog.Dialog = null,
+    /// What the last dialog's answer carried, kept until the next pump.
+    answers: std.heap.ArenaAllocator,
+    /// xdg-foreign, where the compositor has it, and the export that names
+    /// the dialog's window to the portal for as long as the dialog is open.
+    exporter: ?*Proxy = null,
+    exported: ?*Proxy = null,
+    export_handle: [256]u8 = undefined,
+    export_handle_len: usize = 0,
 };
 
 /// One `wl_data_offer`, and the best of `text_types` it has said it can give.
@@ -828,6 +892,8 @@ pub const vtable: backend.Vtable = .{
     .setClipboardText = setClipboardText,
     .clipboardText = clipboardText,
     .hasClipboardText = hasClipboardText,
+    .showFileDialog = showFileDialog,
+    .chosenFile = chosenFile,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -906,6 +972,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
 
     buildXdgInterfaces(core);
     buildPointerInterfaces(core);
+    buildForeignInterfaces(core);
 
     self.* = .{
         .gpa = gpa,
@@ -913,6 +980,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .w = w,
         .core = core,
         .display = display,
+        .answers = .init(gpa),
     };
 
     if (comptime has_display) {
@@ -1228,6 +1296,15 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     const self = cast(impl);
     const w = self.w;
 
+    // Before the wake pipe, which the dialog's thread writes to as it ends.
+    if (self.dialog) |job| {
+        job.cancel();
+        job.destroy();
+    }
+    unexport(self);
+    if (self.exporter) |exporter| requestDestroy(self, exporter, exporter_destroy);
+    self.answers.deinit();
+
     if (self.cursor_surface) |surface| requestDestroy(self, surface, surface_destroy);
     if (self.theme) |theme| {
         if (self.wc) |wc| wc.wl_cursor_theme_destroy(theme);
@@ -1329,6 +1406,8 @@ fn onGlobal(
         }
     } else if (std.mem.eql(u8, text, "wl_data_device_manager")) {
         self.data_manager = bindGlobal(self, registry, name, self.core.wl_data_device_manager_interface, @min(version, 3));
+    } else if (std.mem.eql(u8, text, "zxdg_exporter_v2")) {
+        self.exporter = bindGlobal(self, registry, name, &exporter_interface, 1);
     }
 }
 
@@ -2434,6 +2513,89 @@ fn hasClipboardText(impl: backend.Impl) bool {
     return offer.text != null;
 }
 
+/// Wayland has no dialog of its own: the desktop's portal is asked, or zenity
+/// or kdialog - see `linux_dialog`. The portal is told the window through
+/// xdg-foreign, where the compositor has it, and is told nothing otherwise.
+fn showFileDialog(impl: backend.Impl, gpa: Allocator, wanted: backend.DialogRequest) Error!void {
+    if (comptime !has_display or builtin.single_threaded) return error.Unavailable;
+    const self = cast(impl);
+    if (self.dialog != null) return error.Unavailable;
+    var parent: [300]u8 = undefined;
+    const handle = if (wanted.owner) |native| exportWindow(self, castWindow(native), &parent) else "";
+    self.dialog = linux_dialog.Dialog.start(gpa, wanted, handle, self.wake[1]) catch |err| {
+        unexport(self);
+        return err;
+    };
+}
+
+/// `wayland:HANDLE`, or nothing where there is no handle to be had.
+///
+/// Waited for on a queue of its own: a roundtrip on the display's queue would
+/// run every listener, outside a pump, where what they pushed would be lost.
+fn exportWindow(self: *Impl, win: *Native, buffer: []u8) []const u8 {
+    const exporter = self.exporter orelse return "";
+    const create_queue = self.w.wl_display_create_queue orelse return "";
+    const roundtrip = self.w.wl_display_roundtrip_queue orelse return "";
+    const set_queue = self.w.wl_proxy_set_queue orelse return "";
+    const destroy_queue = self.w.wl_event_queue_destroy orelse return "";
+
+    const queue = create_queue(self.display) orelse return "";
+    defer destroy_queue(queue);
+    var args = [_]WlArgument{ .{ .n = 0 }, .{ .o = win.surface } };
+    const exported = construct(self, exporter, exporter_export_toplevel, &exported_interface, 1, &args) orelse return "";
+    set_queue(exported, queue);
+    self.export_handle_len = 0;
+    _ = self.w.wl_proxy_add_listener(exported, &exported_listener, self);
+    const answered = roundtrip(self.display, queue) >= 0 and self.export_handle_len > 0;
+    // Back on the display's queue before this one is destroyed under it.
+    set_queue(exported, null);
+    if (!answered) {
+        requestDestroy(self, exported, exported_destroy);
+        return "";
+    }
+    self.exported = exported;
+    return std.fmt.bufPrint(buffer, "wayland:{s}", .{self.export_handle[0..self.export_handle_len]}) catch "";
+}
+
+fn unexport(self: *Impl) void {
+    if (self.exported) |exported| requestDestroy(self, exported, exported_destroy);
+    self.exported = null;
+}
+
+const ExportedListener = extern struct {
+    handle: *const fn (?*anyopaque, *Proxy, [*:0]const u8) callconv(.c) void,
+};
+
+const exported_listener: ExportedListener = .{ .handle = onExportedHandle };
+
+fn onExportedHandle(data: ?*anyopaque, proxy: *Proxy, handle: [*:0]const u8) callconv(.c) void {
+    _ = proxy;
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    const text = std.mem.span(handle);
+    if (text.len > self.export_handle.len) return;
+    @memcpy(self.export_handle[0..text.len], text);
+    self.export_handle_len = text.len;
+}
+
+fn chosenFile(impl: backend.Impl, index: usize, path: []const u8, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    _ = .{ impl, index };
+    if (comptime !has_display) return error.Unavailable;
+    return linux_dialog.readFile(path, out, gpa);
+}
+
+fn answerDialog(self: *Impl) void {
+    const job = self.dialog orelse return;
+    if (!job.finished()) return;
+    self.dialog = null;
+    defer job.destroy();
+    unexport(self);
+    const paths = job.paths(self.answers.allocator()) catch {
+        self.push_failed = true;
+        return;
+    };
+    push(self, .{ .file_dialog = .{ .window = job.request.window, .id = job.request.id, .paths = paths } });
+}
+
 /// Have the clipboard's owner write it down a pipe, and read until the owner
 /// closes it - or until it goes quiet for longer than `clipboard.timeout_ms`,
 /// which leaves nothing rather than half.
@@ -2687,6 +2849,13 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
     const self = cast(impl);
     const win = castWindow(native);
 
+    // The export names this surface, and goes before it does.
+    if (self.dialog) |job| {
+        if (job.request.window == win.id) {
+            job.cancel();
+            unexport(self);
+        }
+    }
     releaseConstraint(self, win);
 
     // The context and its surface first, then the `wl_egl_window`, then the
@@ -2854,6 +3023,10 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
     self.queue = queue;
     self.push_failed = false;
     defer self.queue = null;
+
+    // The last answer's paths were promised until now.
+    _ = self.answers.reset(.retain_capacity);
+    answerDialog(self);
 
     // Anything already in the client's buffer, then whatever is on the socket.
     _ = w.wl_display_dispatch_pending(self.display);

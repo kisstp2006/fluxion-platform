@@ -63,6 +63,11 @@ pub const Kind = enum(u32) {
     /// A WebGL context is back. `a` and `b` are the drawing buffer in device
     /// pixels.
     surface_created = 15,
+    /// A file dialog was answered: `a` files, whose names follow as that many
+    /// `dialog_file` records. `b` is the dialog's id.
+    dialog_begin = 16,
+    /// One chosen file. `a` is its index, the text its name.
+    dialog_file = 17,
     _,
 };
 
@@ -214,6 +219,8 @@ test "the event kinds are the numbers the glue sends" {
     try testing.expectEqual(13, @intFromEnum(Kind.drop_file));
     try testing.expectEqual(14, @intFromEnum(Kind.surface_lost));
     try testing.expectEqual(15, @intFromEnum(Kind.surface_created));
+    try testing.expectEqual(16, @intFromEnum(Kind.dialog_begin));
+    try testing.expectEqual(17, @intFromEnum(Kind.dialog_file));
 }
 
 test "the window info is laid out the way the glue fills it" {

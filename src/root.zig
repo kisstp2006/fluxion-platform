@@ -75,6 +75,7 @@ pub const gamepad = @import("gamepad.zig");
 pub const gl = @import("gl.zig");
 pub const vulkan = @import("vulkan.zig");
 pub const text = @import("text.zig");
+pub const dialog = @import("dialog.zig");
 /// The console and the panic handler a browser build needs. See `web`.
 pub const web = @import("web.zig");
 
@@ -95,6 +96,12 @@ pub const Event = event.Event;
 
 /// Which window an event is about. See `event`.
 pub const WindowId = event.WindowId;
+
+/// Which file dialog an answer belongs to. See `event`.
+pub const DialogId = event.DialogId;
+
+/// One entry in a file dialog's list of types. See `dialog`.
+pub const FileFilter = dialog.Filter;
 
 /// A physical key, at its position on a US layout. See `keys`.
 pub const Key = keys.Key;
@@ -163,6 +170,7 @@ test {
     _ = gl;
     _ = vulkan;
     _ = text;
+    _ = dialog;
     _ = web;
     _ = @import("window_ops_test.zig");
     _ = @import("cursor_test.zig");
@@ -180,10 +188,14 @@ test {
     _ = @import("backend/virtual_key.zig");
     // Nor the clipboard's conversions.
     _ = @import("backend/clipboard.zig");
+    // Nor what a Linux desktop is asked for a file, which is bytes and strings.
+    _ = @import("backend/dbus.zig");
+    _ = @import("backend/portal.zig");
 
     const os = @import("builtin").os.tag;
     if (os == .windows) {
         _ = @import("backend/win32.zig");
+        _ = @import("backend/win32_dialog.zig");
         _ = @import("backend/xinput.zig");
         _ = @import("backend/wgl.zig");
     }
@@ -196,6 +208,7 @@ test {
     _ = @import("backend/jni.zig");
     _ = @import("backend/android_text.zig");
     _ = @import("backend/android_clipboard.zig");
+    _ = @import("backend/android_dialog.zig");
     // And the web backend in full: off a browser it talks to `web_stub.zig`,
     // a fake page, so the whole path from a record to an event is checked on
     // whatever machine runs the tests.
@@ -210,6 +223,7 @@ test {
         if (!@import("builtin").abi.isAndroid()) {
             _ = @import("backend/x11.zig");
             _ = @import("backend/wayland.zig");
+            _ = @import("backend/linux_dialog.zig");
             _ = @import("backend/linux_gamepad.zig");
             _ = @import("backend/glx.zig");
             _ = @import("backend/egl.zig");

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSL-1.0
 
 //! The slice of JNI the Android backend reaches the VM through: what a key
-//! types (`android_text`) and the clipboard (`android_clipboard`), neither of
-//! which the NDK exposes to C.
+//! types (`android_text`), the clipboard (`android_clipboard`) and the file
+//! dialog (`android_dialog`), none of which the NDK exposes to C.
 //!
 //! **The function tables are indexed by position.** `JNINativeInterface` is a
 //! struct of function pointers whose order is fixed by the specification and
@@ -130,6 +130,22 @@ pub const NativeInterface = extern struct {
     /// surrogates of three bytes each, and a real four-byte sequence is refused
     /// or corrupted. Only ever handed ASCII here; text goes through `NewString`.
     NewStringUTF: ?*const fn (JniEnv, [*:0]const u8) callconv(.c) JObject = null, // 167
+    /// 168 to 170: the modified-UTF-8 reads, which this backend never makes.
+    unused_168: [3]?*anyopaque = @splat(null),
+    GetArrayLength: ?*const fn (JniEnv, JObject) callconv(.c) i32 = null, // 171
+    NewObjectArray: ?*const fn (JniEnv, i32, JClass, JObject) callconv(.c) JObject = null, // 172
+    GetObjectArrayElement: ?*const fn (JniEnv, JObject, i32) callconv(.c) JObject = null, // 173
+    SetObjectArrayElement: ?*const fn (JniEnv, JObject, i32, JObject) callconv(.c) void = null, // 174
+    /// 175 to 214: the primitive arrays.
+    unused_175: [40]?*anyopaque = @splat(null),
+    RegisterNatives: ?*const fn (JniEnv, JClass, [*]const NativeMethod, i32) callconv(.c) i32 = null, // 215
+};
+
+/// `JNINativeMethod`: a Java `native` method, and the C function behind it.
+pub const NativeMethod = extern struct {
+    name: [*:0]const u8,
+    signature: [*:0]const u8,
+    function: *const anyopaque,
 };
 
 /// `jvalue`, the union an array-form call takes its arguments as.
@@ -193,11 +209,16 @@ test "the JNI slots are where the specification puts them" {
         .{ "GetStringChars", 165 },
         .{ "ReleaseStringChars", 166 },
         .{ "NewStringUTF", 167 },
+        .{ "GetArrayLength", 171 },
+        .{ "NewObjectArray", 172 },
+        .{ "GetObjectArrayElement", 173 },
+        .{ "SetObjectArrayElement", 174 },
+        .{ "RegisterNatives", 215 },
     };
     inline for (slots) |slot| {
         try testing.expectEqual(slot[1] * size, @offsetOf(NativeInterface, slot[0]));
     }
-    try testing.expectEqual(168 * size, @sizeOf(NativeInterface));
+    try testing.expectEqual(216 * size, @sizeOf(NativeInterface));
 
     try testing.expectEqual(4 * size, @offsetOf(InvokeInterface, "AttachCurrentThread"));
     try testing.expectEqual(5 * size, @offsetOf(InvokeInterface, "DetachCurrentThread"));

@@ -50,6 +50,7 @@ const vulkan = @import("../vulkan.zig");
 const text_mod = @import("../text.zig");
 const android_text = @import("android_text.zig");
 const android_clipboard = @import("android_clipboard.zig");
+const android_dialog = @import("android_dialog.zig");
 const jni = @import("jni.zig");
 const virtual_key = @import("virtual_key.zig");
 const keys = @import("../keys.zig");
@@ -262,6 +263,8 @@ pub const Cmd = enum(u8) {
     focus_lost,
     low_memory,
     config_changed,
+    /// A file dialog's answer is in `Glue.answer`.
+    dialog_answered,
     _,
 };
 
@@ -296,6 +299,10 @@ pub const Glue = struct {
     /// which is an ANR, and which is what a device shows and a desktop never
     /// would.
     app_running: std.atomic.Value(bool) = .init(false),
+
+    /// The last file dialog's answer, as an `*android_dialog.Answer`, set by
+    /// the Java thread that heard it just before `.dialog_answered`.
+    answer: std.atomic.Value(usize) = .init(0),
 
     /// UI thread writes commands, app thread reads them.
     cmd_pipe: [2]c_int = .{ -1, -1 },
@@ -488,6 +495,12 @@ pub fn nativeActivityOnCreate(
     glue.cmd_pipe = cmd_fds;
     glue.ack_pipe = ack_fds;
 
+    // Here, on the UI thread, because `onActivityResult` comes on this thread
+    // after this returns - even to an activity recreated to hear one.
+    if (activity.env) |env| {
+        _ = android_dialog.register(@ptrCast(@alignCast(env)), activity.clazz, &answered);
+    }
+
     // The app's thread. Everything after this happens on two threads, and the
     // pipe is the only thing that crosses between them.
     const thread = std.Thread.spawn(.{}, appThread, .{}) catch return;
@@ -548,6 +561,17 @@ fn endActivity() void {
     finish(activity);
 }
 
+/// `FluxionActivity.answered`, on the Java thread that gathered the answer.
+/// It is copied out and handed to the app thread the way a window is.
+fn answered(env: jni.JniEnv, class: jni.JClass, id: i32, names: jni.JObject, uris: jni.JObject) callconv(.c) void {
+    _ = class;
+    const answer = android_dialog.Answer.fromJava(env, id, names, uris) orelse
+        android_dialog.Answer.empty(id) orelse return;
+    const earlier = glue.answer.swap(@intFromPtr(answer), .acq_rel);
+    if (earlier != 0) @as(*android_dialog.Answer, @ptrFromInt(earlier)).destroy();
+    glue.writeCmd(.dialog_answered);
+}
+
 /// The activity, while there is one.
 ///
 /// Null once `onDestroy` has been answered: the system frees the activity as
@@ -587,6 +611,16 @@ const Impl = struct {
     text: android_text.Backend = .{},
     /// The clipboard, over the same attachment. See `android_clipboard`.
     clipboard: android_clipboard.Backend = .{},
+    /// The file dialog, over it too. See `android_dialog`.
+    dialog: android_dialog.Backend = .{},
+    /// The dialog that is open, until its answer arrives.
+    dialog_open: ?event.DialogId = null,
+    dialog_window: event.WindowId = .none,
+    /// The last answer's URIs, beside the names it gave: what `chosenFile`
+    /// reads. Kept until the next answer.
+    chosen: std.ArrayListUnmanaged([]u8) = .empty,
+    /// The last answer's names, kept until the next pump.
+    answers: std.heap.ArenaAllocator,
     /// Nothing composes here: a `NativeActivity` has no `InputConnection`, so
     /// a soft keyboard commits whole characters and never reports a
     /// composition. Empty rather than null, because that is the truth.
@@ -639,6 +673,8 @@ pub const vtable: backend.Vtable = .{
     .setClipboardText = setClipboardText,
     .clipboardText = clipboardText,
     .hasClipboardText = hasClipboardText,
+    .showFileDialog = showFileDialog,
+    .chosenFile = chosenFile,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -674,6 +710,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .lib = lib,
         .a = a,
         .looper = looper,
+        .answers = .init(gpa),
     };
 
     // Without the pipe there is no glue, which means the program was started
@@ -692,8 +729,16 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
 fn deinit(impl: backend.Impl, gpa: Allocator) void {
     const self = cast(impl);
     // Before the text backend, which detaches the thread it needs.
-    if (self.text.env) |env| self.clipboard.close(env);
+    if (self.text.env) |env| {
+        self.clipboard.close(env);
+        self.dialog.close(env);
+    }
     self.text.close();
+    for (self.chosen.items) |uri| gpa.free(uri);
+    self.chosen.deinit(gpa);
+    self.answers.deinit();
+    const unread = glue.answer.swap(0, .acq_rel);
+    if (unread != 0) @as(*android_dialog.Answer, @ptrFromInt(unread)).destroy();
     self.gl.close();
     self.lib.close();
     gpa.destroy(self);
@@ -1019,6 +1064,62 @@ fn hasClipboardText(impl: backend.Impl) bool {
     return self.clipboard.hasText(env);
 }
 
+/// The attached thread, with the activity's dialog methods looked up on it -
+/// which there are only when the manifest names `FluxionActivity`.
+fn dialogEnv(self: *Impl) ?jni.JniEnv {
+    if (!ensureText(self)) return null;
+    const env = self.text.env orelse return null;
+    const activity = liveActivity() orelse return null;
+    if (!self.dialog.open(env, activity.clazz)) return null;
+    return env;
+}
+
+/// The system's document picker, through `FluxionActivity`. A plain
+/// `NativeActivity` has no way to hear its answer, and says so here.
+fn showFileDialog(impl: backend.Impl, gpa: Allocator, request: backend.DialogRequest) Error!void {
+    _ = gpa;
+    const self = cast(impl);
+    if (self.dialog_open != null) return error.Unavailable;
+    const env = dialogEnv(self) orelse return error.Unavailable;
+    const activity = liveActivity() orelse return error.Unavailable;
+    try self.dialog.ask(env, activity.clazz, request);
+    self.dialog_open = request.id;
+    self.dialog_window = request.window;
+}
+
+/// Through the URI kept beside the name: `path` is only a display name.
+fn chosenFile(impl: backend.Impl, index: usize, path: []const u8, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    _ = path;
+    const self = cast(impl);
+    if (index >= self.chosen.items.len) return error.Unavailable;
+    const env = dialogEnv(self) orelse return error.Unavailable;
+    const activity = liveActivity() orelse return error.Unavailable;
+    try self.dialog.read(env, activity.clazz, self.chosen.items[index], out, gpa);
+}
+
+/// The answer the Java side handed over, for the dialog that is open. One
+/// for any other - a process started afresh to hear its last one's - is let
+/// go.
+fn answerDialog(self: *Impl) Error!void {
+    const raw = glue.answer.swap(0, .acq_rel);
+    if (raw == 0) return;
+    const answer: *android_dialog.Answer = @ptrFromInt(raw);
+    defer answer.destroy();
+    const open_id = self.dialog_open orelse return;
+    if (answer.id != @intFromEnum(open_id)) return;
+    self.dialog_open = null;
+
+    for (self.chosen.items) |uri| self.gpa.free(uri);
+    self.chosen.clearRetainingCapacity();
+    try self.chosen.ensureTotalCapacity(self.gpa, answer.uris.len);
+    for (answer.uris) |uri| self.chosen.appendAssumeCapacity(try self.gpa.dupe(u8, uri));
+
+    const arena = self.answers.allocator();
+    const paths = try arena.alloc([]const u8, answer.names.len);
+    for (answer.names, paths) |name, *path| path.* = try arena.dupe(u8, name);
+    push(self, .{ .file_dialog = .{ .window = self.dialog_window, .id = open_id, .paths = paths } });
+}
+
 /// Route one event to the gamepad state, or leave it for the window.
 ///
 /// True means it was a controller's and nothing else should see it.
@@ -1215,6 +1316,9 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
     self.push_failed = false;
     defer self.queue = null;
 
+    // The last answer's names were promised until now.
+    _ = self.answers.reset(.retain_capacity);
+
     // A zero-timeout poll lets the looper move anything waiting on either
     // source into reach, without blocking a frame that has drawing to do.
     _ = self.a.ALooper_pollOnce(0, null, null, null);
@@ -1364,6 +1468,7 @@ pub fn handleCommand(self: *Impl, cmd: Cmd) Error!void {
         .start, .resume_ => push(self, .{ .resumed = {} }),
         .pause, .stop => push(self, .{ .suspended = {} }),
         .low_memory => push(self, .{ .low_memory = {} }),
+        .dialog_answered => try answerDialog(self),
 
         .destroy => {
             push(self, .{ .close = id });
