@@ -25,9 +25,10 @@
 //
 //   3. Stand in for the parts of a window a page does not have: a hidden text
 //      field for the input method and the soft keyboard, pointer lock for a
-//      captured mouse, the Fullscreen API for a fullscreen window - and asking
-//      again on the next click for anything the browser would only grant to a
-//      person who had just done something.
+//      captured mouse, the Fullscreen API for a fullscreen window, the last
+//      paste for a clipboard it may not read - and asking again on the next
+//      click for anything the browser would only grant to a person who had
+//      just done something.
 //
 //   4. Run the program, one of two ways. A module that exports `frame` is
 //      called once per animation frame. A module whose `main` is a loop is
@@ -213,6 +214,16 @@ function isFieldShortcut(event) {
   return command && FIELD_SHORTCUTS.has(event.key?.toLowerCase());
 }
 
+/// Whether a key is the paste shortcut: control or command with the V the
+/// layout puts on its key - or with the key where V is, on a layout with no
+/// Latin letters, which is where the browser looks - or shift with insert.
+function isPasteShortcut(event) {
+  const command = (event.ctrlKey || event.metaKey) && !event.getModifierState?.("AltGraph");
+  if (!command) return event.shiftKey && event.key === "Insert";
+  const key = event.key?.toLowerCase() ?? "";
+  return key === "v" || (!/^[a-z]$/.test(key) && event.code === "KeyV");
+}
+
 /// What a key typed, when the field is not in the way: `key`, if it is one
 /// codepoint. A named key is longer - `Enter`, `Dead`, `Shift` - and a
 /// shortcut is not typing. AltGr is control and alt together on Windows, and
@@ -378,6 +389,16 @@ export class Platform {
     this.rawSupported = undefined;
     this.global = null;
     this.focusQueued = false;
+
+    /// The clipboard as far as the page knows it - the last paste, or what
+    /// the program put there since - and null until it knows anything.
+    this.clipboard = null;
+    this.clipboardBytes = null;
+    /// Text the browser has not taken yet, offered again in the next gesture.
+    this.clipboardPending = null;
+    /// Set by the paste shortcut and read by the paste it causes, which the
+    /// browser fires before the key comes back up.
+    this.pasteShortcut = false;
 
     this.decoder = new TextDecoder();
     this.encoder = new TextEncoder();
@@ -650,6 +671,18 @@ export class Platform {
           if (!file || !file.bytes) return 0;
           const count = Math.min(len >>> 0, file.bytes.length);
           self.u8.set(file.bytes.subarray(0, count), ptr >>> 0);
+          return count;
+        },
+
+        setClipboard: (ptr, len) => self.setClipboard(self.text(ptr, len)),
+
+        clipboardSize: () => (self.clipboard === null ? -1 : self.clipboardEncoded().length),
+
+        clipboardRead: (ptr, len) => {
+          if (self.clipboard === null) return 0;
+          const bytes = self.clipboardEncoded();
+          const count = Math.min(len >>> 0, bytes.length);
+          self.u8.set(bytes.subarray(0, count), ptr >>> 0);
           return count;
         },
       },
@@ -951,6 +984,7 @@ export class Platform {
 
     window.addEventListener("focus", () => this.focusChanged(), { signal });
     window.addEventListener("blur", () => this.focusChanged(), { signal });
+    document.addEventListener("paste", (event) => this.pasted(event), { signal });
 
     this.watchScale(signal);
   }
@@ -1319,6 +1353,7 @@ export class Platform {
   keyDown(win, event, fromField) {
     this.gesture();
     win.lastMods = modsOf(event);
+    if (isPasteShortcut(event)) this.pasteShortcut = true;
 
     // An input method is working on this key, and what it makes of it
     // arrives as a composition. Reporting the key as well would have a
@@ -1351,6 +1386,7 @@ export class Platform {
 
   keyUp(win, event, fromField) {
     win.lastMods = modsOf(event);
+    this.pasteShortcut = false;
     const position = positionOf(event);
     if (position && !(event.isComposing || event.keyCode === 229)) {
       const c = this.labelOf(event, position);
@@ -1406,6 +1442,7 @@ export class Platform {
         this.enterFullscreen(win);
       }
     }
+    if (this.clipboardPending !== null) this.writeClipboard();
   }
 
   local(win, event) {
@@ -1788,6 +1825,77 @@ export class Platform {
     if (win.composing || event.isComposing) return;
     this.consume(win);
     this.resetField(win);
+  }
+
+  // -- the clipboard --
+
+  remember(text) {
+    this.clipboard = text;
+    this.clipboardBytes = null;
+  }
+
+  clipboardEncoded() {
+    this.clipboardBytes ??= this.encoder.encode(this.clipboard);
+    return this.clipboardBytes;
+  }
+
+  /// Put text on the clipboard, and keep it for `clipboardText`. A browser
+  /// that wants a person to have just done something is asked again inside
+  /// the next key press or click - see `gesture`.
+  setClipboard(text) {
+    this.remember(text);
+    if (!navigator.clipboard?.writeText && typeof document.execCommand !== "function") return 0;
+    this.clipboardPending = text;
+    this.writeClipboard();
+    return 1;
+  }
+
+  writeClipboard() {
+    const text = this.clipboardPending;
+    const written = () => {
+      if (this.clipboardPending === text) this.clipboardPending = null;
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(written, () => {});
+    } else if (this.copyCommand(text)) {
+      written();
+    }
+  }
+
+  /// The old way, for a page with no `navigator.clipboard` - one served over
+  /// plain http, say: copy the selection of a field made for the purpose.
+  copyCommand(text) {
+    const field = document.createElement("textarea");
+    field.value = text;
+    field.setAttribute("readonly", "");
+    Object.assign(field.style, { position: "fixed", left: "-9999px", top: "0px", opacity: "0" });
+    const focused = document.activeElement;
+    document.body.appendChild(field);
+    field.select();
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      copied = false;
+    }
+    field.remove();
+    focused?.focus?.({ preventScroll: true });
+    return copied;
+  }
+
+  /// Somebody pasted, which is the one time a page may read the clipboard.
+  /// The text is kept for `clipboardText`, and a shortcut's paste is kept out
+  /// of the hidden field: the program hears the shortcut as a key and pastes
+  /// for itself, as it would on a desktop. Any other paste - the browser's own
+  /// menu - still types into the field.
+  pasted(event) {
+    this.remember(event.clipboardData?.getData("text/plain") ?? "");
+    // What the clipboard holds is known now, and a copy the browser has not
+    // taken yet would replace it behind the user's back.
+    this.clipboardPending = null;
+    const field = [...this.windows.values()].some((win) => win.field !== null && win.field === event.target);
+    if (field && this.pasteShortcut) event.preventDefault();
+    this.pasteShortcut = false;
   }
 
   // -- the screen and the controllers --

@@ -29,6 +29,10 @@
 //!   M  fill the page, and give the space back
 //!   C  the next cursor shape, and H hides it
 //!
+//! and ctrl+C to copy what was typed, ctrl+V to paste - the program's own
+//! shortcuts, which a page hears as keys the way a desktop does. The paste
+//! arrives with the key, so another program's text can be pasted too.
+//!
 //! and dropping a file on the canvas, plugging in a controller and pressing a
 //! button on it, and zooming the page with ctrl and plus.
 
@@ -57,6 +61,8 @@ var drawing = true;
 var shape: usize = 0;
 var last_pad: platform.gamepad.State = .{};
 var moves: u64 = 0;
+/// What was typed, for ctrl+C to copy.
+var typed: std.ArrayListUnmanaged(u8) = .empty;
 
 /// Open the context and the window. Called once, by the page.
 ///
@@ -119,6 +125,7 @@ export fn frame() bool {
 }
 
 export fn deinit() void {
+    typed.deinit(gpa);
     win.destroy();
     ctx.deinit();
 }
@@ -132,11 +139,14 @@ fn handle(ev: platform.Event) void {
             // alt, which a browser does not count as a modifier at all.
             const chord = k.mods.control or k.mods.alt or k.mods.super or ctx.key(.right_alt);
             if (k.action == .press and !chord) command(k.key);
+            const command_key = (k.mods.control or k.mods.super) and !k.mods.alt and !ctx.key(.right_alt);
+            if (k.action == .press and command_key) shortcut(k.virtual);
         },
         .char => |ch| {
             var utf8: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(ch.codepoint, &utf8) catch 0;
             std.log.info("char     U+{X:0>4} '{s}'", .{ ch.codepoint, utf8[0..len] });
+            typed.appendSlice(gpa, utf8[0..len]) catch {};
         },
         .preedit => std.log.info("preedit  {f}", .{ctx.preedit()}),
 
@@ -248,6 +258,23 @@ fn command(key: platform.Key) void {
             const wanted: platform.CursorMode = if (win.cursorMode() == .hidden) .normal else .hidden;
             win.setCursorMode(wanted) catch {};
             std.log.info("cursor mode {t}", .{wanted});
+        },
+        else => {},
+    }
+}
+
+/// Ctrl+C copies what was typed and ctrl+V pastes, by the letter the layout
+/// puts on the key.
+fn shortcut(key: platform.Key) void {
+    switch (key) {
+        .c => {
+            ctx.setClipboardText(typed.items) catch |err| return std.log.warn("copy: {t}", .{err});
+            std.log.info("copied   \"{s}\"", .{typed.items});
+        },
+        .v => {
+            const pasted = ctx.clipboardText() catch |err| return std.log.warn("paste: {t}", .{err});
+            std.log.info("pasted   \"{s}\"", .{pasted});
+            typed.appendSlice(gpa, pasted) catch {};
         },
         else => {},
     }

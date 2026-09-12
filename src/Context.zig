@@ -52,6 +52,7 @@ const monitor = @import("monitor.zig");
 const gamepad_mod = @import("gamepad.zig");
 const vulkan = @import("vulkan.zig");
 const text_mod = @import("text.zig");
+const clipboard_mod = @import("backend/clipboard.zig");
 
 /// A backend is imported only where it could run. `fluxion-dyn` has no library
 /// handle on a target with no run-time loading - `wasm32`, and anything else
@@ -117,6 +118,9 @@ pads: [gamepad_mod.max_devices]gamepad_mod.Device = @splat(.{}),
 /// The layouts a program has loaded, for controllers the system does not
 /// already know. Empty on a machine where every pad is an Xbox one.
 mappings: gamepad_mod.Store = .{},
+
+/// What `clipboardText` last read, kept so its answer needs no freeing.
+clipboard: std.ArrayListUnmanaged(u8) = .empty,
 
 /// Open the windowing system.
 ///
@@ -184,6 +188,7 @@ pub fn deinit(self: *Context) void {
     self.monitor_list.deinit(self.gpa);
     self.monitor_modes.deinit(self.gpa);
     self.mappings.deinit(self.gpa);
+    self.clipboard.deinit(self.gpa);
     self.queue.deinit();
     self.vtable.deinit(self.impl, self.gpa);
     self.* = undefined;
@@ -366,6 +371,50 @@ pub fn clearContext(self: *Context) void {
 /// actually opened. See `vulkan`.
 pub fn requiredVulkanExtensions(self: *const Context) []const [*:0]const u8 {
     return vulkan.requiredInstanceExtensions(self.vtable.backend);
+}
+
+// -------------------------------------------------------------------------
+// The clipboard
+//
+// Text, and the same text on every platform: UTF-8 with `\n` between lines,
+// converted on the way out to whatever the system keeps and back on the way
+// in. It belongs to the session rather than to a window, so it lives here.
+// -------------------------------------------------------------------------
+
+/// Put `text` on the system clipboard, for this program and every other.
+///
+/// Copied, so `text` may go as soon as this returns. Text that is not UTF-8 is
+/// refused with `error.Unavailable`, and so is a system that will not take it:
+/// Wayland takes the clipboard only from a program with the keyboard, and a
+/// page may not have a clipboard at all. See the README for each platform.
+pub fn setClipboardText(self: *Context, text: []const u8) Error!void {
+    if (!std.unicode.utf8ValidateSlice(text)) return error.Unavailable;
+    return self.vtable.setClipboardText(self.impl, text);
+}
+
+/// The text on the clipboard, or nothing when it holds none.
+///
+/// UTF-8 with `\n` between lines whatever put it there, with U+FFFD for bytes
+/// that were not text. The context's, and valid until the next call.
+///
+/// On X11 and Wayland this asks the program that owns the clipboard and waits
+/// for it, giving up after a second in which it sends nothing. In a browser it
+/// is the last paste the page heard or what the program put there since,
+/// because a page may read the clipboard only when somebody pastes - which is
+/// also when a program wants it.
+pub fn clipboardText(self: *Context) Error![]const u8 {
+    self.clipboard.clearRetainingCapacity();
+    try self.vtable.clipboardText(self.impl, &self.clipboard, self.gpa);
+    try clipboard_mod.normalize(self.gpa, &self.clipboard);
+    return self.clipboard.items;
+}
+
+/// Whether the clipboard holds text, asked without reading it.
+///
+/// For a Paste entry that greys out. Not free on X11, which asks the owner, but
+/// quiet on Android, which shows a notice every time a program reads.
+pub fn hasClipboardText(self: *Context) bool {
+    return self.vtable.hasClipboardText(self.impl);
 }
 
 // -------------------------------------------------------------------------

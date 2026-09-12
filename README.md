@@ -28,11 +28,11 @@ all.
 
 | Backend | State |
 | --- | --- |
-| `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition |
-| `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text |
-| `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose |
-| `android` | Activity lifecycle, surface create and loss, focus, keys, touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text |
-| `web` | Canvas, both loop models, keyboard, text and composition, mouse, touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files |
+| `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition, clipboard |
+| `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard |
+| `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard |
+| `android` | Activity lifecycle, surface create and loss, focus, keys, touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard |
+| `web` | Canvas, both loop models, keyboard, text and composition, mouse, touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard |
 | `none` | Compiles and runs everywhere, makes no windows |
 
 On Linux `auto` opens Wayland where there is a compositor and falls through to
@@ -229,6 +229,49 @@ method itself, which is what the root preedit style means and what every
 toolkit falls back to; delivering it to the program needs
 `XIMPreeditCallbacks`. On Wayland there is no input method at all yet, though
 dead keys and compose sequences work.
+
+## The clipboard is text, and the same text everywhere
+
+```zig
+const command = k.mods.control and !k.mods.alt;               // not AltGr
+if (command and k.virtual == .c) try ctx.setClipboardText(field.selected());
+if (command and k.virtual == .v) field.insert(try ctx.clipboardText());
+```
+
+UTF-8 with `\n` between lines, going in and coming out, on every backend.
+Windows keeps UTF-16 with `\r\n`, Android keeps UTF-16, an old X11 program
+offers Latin-1, and whatever copied may have written any of those - or bytes
+that are not text at all. Each is converted at the edge, and what cannot be
+read as text arrives as U+FFFD rather than as an error. The answer is the
+context's, valid until the next call.
+
+**Pasting is the program's.** Ctrl+V arrives as the key it is, and the
+program asks `clipboardText` what to insert - which is why the shortcut
+compares `virtual`, the letter the layout puts on the key.
+`hasClipboardText` answers without reading, for a Paste entry that greys out.
+
+**A read may wait.** On X11 and Wayland nothing keeps the clipboard: the
+program that copied holds it, and reading means asking that program. The
+read gives up after a second in which that program has said nothing, so one
+that has hung costs a second and an empty answer rather than this program's
+whole future.
+
+| | copy | paste | worth knowing |
+| --- | --- | --- | --- |
+| `win32` | `CF_UNICODETEXT`, with `\r\n` | the same, which Windows makes from any other text format | outlives the program |
+| `x11` | owns `CLIPBOARD`, answers `UTF8_STRING` and `text/plain;charset=utf-8` | asks the owner, in pieces (`INCR`) when it is large | handed to a clipboard manager at exit, where one runs; a copy goes out in one request, so 16 MB at most |
+| `wayland` | a data source, written down a pipe | a data offer, read from a pipe | only while a window has the keyboard, which is Wayland's own rule |
+| `android` | `ClipboardManager`, over JNI | the same | read only in the foreground from Android 10, with a notice from 12 |
+| `web` | `navigator.clipboard`, or the copy command over plain http | the last paste the page heard | a page may read only when somebody pastes |
+
+**On a page, the paste comes with the key.** A browser lets a page read the
+clipboard only inside a paste, so the glue keeps the text of the last one -
+and ctrl+V's paste arrives in the same pump as ctrl+V's key, which is all a
+program pasting on the shortcut needs. That paste is kept out of the hidden
+text field, so it is inserted once, by the program, as it would be anywhere
+else; a paste from the browser's own menu still types into the field.
+Writing may want a key press or a click first, in Firefox and Safari, and is
+tried again inside the next one.
 
 ## Drawing: a context, or a surface, and nothing after that
 
@@ -565,7 +608,7 @@ window handle pointing at where it used to be. Keep it where it was made.
 zig build example          # what this machine's windowing is, opening nothing
 zig build example-window   # a window, and every event it produces
 zig build example-gl       # an OpenGL context, clearing to a colour that moves
-zig build example-text     # typing, and the difference between a key and a letter
+zig build example-text     # typing, the difference between a key and a letter, and the clipboard
 zig build example-vulkan   # an instance from fluxion-vulkan, and the surface made from a window
 zig build example-web      # the browser examples, into zig-out/web
 ```
@@ -600,6 +643,11 @@ Both desktop backends carry the same end-to-end test: open a hidden window,
 put a real message into the system's own queue, and check it comes back out of
 `poll` as an event naming that window. They skip rather than fail where there
 is no session to open.
+
+The clipboard is read on a real backend but never written: a test run that
+replaced whatever the person running it had copied would be a nuisance. The
+writing is checked against the web backend's fake page, the conversions on
+every host, and the rest by `example-text`.
 
 The web backend runs its tests on every host, against a page that is not
 there: `web_stub.zig` answers every import the browser would, and a test

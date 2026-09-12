@@ -41,6 +41,7 @@ const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
 const evdev = @import("evdev.zig");
 const cursor_mod = @import("../cursor.zig");
+const clipboard = @import("clipboard.zig");
 
 const Error = platform.Error;
 
@@ -229,6 +230,52 @@ const XClientMessageEvent = extern struct {
     },
 };
 
+const XPropertyEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    window: Window,
+    atom: Atom,
+    time: Time,
+    state: c_int,
+};
+
+const XSelectionClearEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    window: Window,
+    selection: Atom,
+    time: Time,
+};
+
+const XSelectionRequestEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    owner: Window,
+    requestor: Window,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: Time,
+};
+
+const XSelectionEvent = extern struct {
+    type: c_int,
+    serial: c_ulong,
+    send_event: Bool,
+    display: ?*Display,
+    requestor: Window,
+    selection: Atom,
+    target: Atom,
+    property: Atom,
+    time: Time,
+};
+
 /// `long pad[24]`, which is what every X event has to fit inside.
 const XEvent = extern union {
     type: c_int,
@@ -241,6 +288,10 @@ const XEvent = extern union {
     xexpose: XExposeEvent,
     xconfigure: XConfigureEvent,
     xclient: XClientMessageEvent,
+    xproperty: XPropertyEvent,
+    xselectionclear: XSelectionClearEvent,
+    xselectionrequest: XSelectionRequestEvent,
+    xselection: XSelectionEvent,
     pad: [24]c_long,
 };
 
@@ -300,6 +351,10 @@ const focus_in: c_int = 9;
 const focus_out: c_int = 10;
 const expose: c_int = 12;
 const configure_notify: c_int = 22;
+const property_notify: c_int = 28;
+const selection_clear: c_int = 29;
+const selection_request: c_int = 30;
+const selection_notify: c_int = 31;
 const client_message: c_int = 33;
 
 // Event masks.
@@ -313,6 +368,7 @@ const pointer_motion_mask: c_long = 1 << 6;
 const exposure_mask: c_long = 1 << 15;
 const structure_notify_mask: c_long = 1 << 17;
 const focus_change_mask: c_long = 1 << 21;
+const property_change_mask: c_long = 1 << 22;
 
 const window_event_mask: c_long = key_press_mask | key_release_mask |
     button_press_mask | button_release_mask |
@@ -333,6 +389,20 @@ const p_min_size: c_long = 1 << 4;
 const p_max_size: c_long = 1 << 5;
 
 const prop_mode_replace: c_int = 0;
+
+/// The predefined atoms `ATOM` and `STRING`, and the rest of what a selection
+/// is spoken in.
+const xa_atom: Atom = 4;
+const xa_string: Atom = 31;
+const any_property_type: Atom = 0;
+const property_new_value: c_int = 0;
+const current_time: Time = 0;
+/// `InputOnly` and `CWEventMask`: a window that is never drawn, only named.
+const input_only: c_uint = 2;
+const cw_event_mask: c_ulong = 1 << 11;
+
+/// `XErrorHandler`. The event is left untyped: nothing here reads it.
+const ErrorHandler = *const fn (?*Display, ?*anyopaque) callconv(.c) c_int;
 
 /// `XSetInputFocus` revert-to, and the `_NET_WM_STATE` actions.
 const revert_to_parent: c_int = 1;
@@ -509,6 +579,16 @@ const Xlib = struct {
     ) callconv(.c) Window,
     XCreateColormap: *const fn (*Display, Window, ?*anyopaque, c_int) callconv(.c) Colormap,
     XFreeColormap: *const fn (*Display, Colormap) callconv(.c) c_int,
+
+    /// The clipboard, which X11 calls a selection - see `Selection`.
+    XSetSelectionOwner: *const fn (*Display, Atom, Window, Time) callconv(.c) c_int,
+    XGetSelectionOwner: *const fn (*Display, Atom) callconv(.c) Window,
+    XConvertSelection: *const fn (*Display, Atom, Atom, Atom, Window, Time) callconv(.c) c_int,
+    XCheckTypedWindowEvent: *const fn (*Display, Window, c_int, *XEvent) callconv(.c) Bool,
+    XSync: *const fn (*Display, Bool) callconv(.c) c_int,
+    XSetErrorHandler: *const fn (?ErrorHandler) callconv(.c) ?ErrorHandler,
+    XMaxRequestSize: *const fn (*Display) callconv(.c) c_long,
+    XExtendedMaxRequestSize: *const fn (*Display) callconv(.c) c_long,
 
     /// The input method, and the per-window context that uses it.
     ///
@@ -765,6 +845,35 @@ const Impl = struct {
     /// event thread can wake one that is sleeping. X itself has no call for
     /// this that is safe to make from another thread.
     wake: if (has_display) [2]c_int else void = if (has_display) .{ -1, -1 } else {},
+
+    /// See `Selection`. Null until the clipboard is first used.
+    selection: ?Selection = null,
+    /// What this program copied, served to whoever asks until another program
+    /// takes the clipboard.
+    clipboard_text: std.ArrayListUnmanaged(u8) = .empty,
+    owns_clipboard: bool = false,
+};
+
+/// The window that owns what this program copies and receives what it pastes,
+/// and the atoms the exchange is spoken in.
+///
+/// X11 keeps no clipboard. `CLIPBOARD` is a selection: one client owns it, and
+/// a client that wants the contents asks the owner to convert them to a type
+/// and write them into a property on the asker's window. So a copy is taking
+/// ownership and answering every request `pump` brings, and a paste is asking
+/// and waiting for the answer.
+const Selection = struct {
+    window: Window,
+    clipboard: Atom,
+    targets: Atom,
+    multiple: Atom,
+    atom_pair: Atom,
+    incr: Atom,
+    utf8_mime: Atom,
+    manager: Atom,
+    save_targets: Atom,
+    /// Where an owner is asked to put what it sends.
+    property: Atom,
 };
 
 const Native = struct {
@@ -843,6 +952,9 @@ pub const vtable: backend.Vtable = .{
     .setTextInput = setTextInput,
     .setTextInputArea = setTextInputArea,
     .preedit = preedit,
+    .setClipboardText = setClipboardText,
+    .clipboardText = clipboardText,
+    .hasClipboardText = hasClipboardText,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -935,6 +1047,11 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
 
 fn deinit(impl: backend.Impl, gpa: Allocator) void {
     const self = cast(impl);
+    if (self.selection) |*selection| {
+        handOver(self, selection);
+        _ = self.x.XDestroyWindow(self.display, selection.window);
+    }
+    self.clipboard_text.deinit(gpa);
     if (comptime has_display) {
         _ = c.close(self.wake[0]);
         _ = c.close(self.wake[1]);
@@ -2029,6 +2146,13 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
         var ev: XEvent = undefined;
         _ = self.x.XNextEvent(self.display, &ev);
 
+        if (self.selection) |*selection| {
+            if (ev.xany.window == selection.window) {
+                selectionEvent(self, selection, &ev);
+                continue;
+            }
+        }
+
         // The input method gets first refusal, and takes the keys that make up
         // a composition. Without this an input method never sees a key, and
         // nothing composes - it is the one call that makes XIM work at all.
@@ -2409,6 +2533,329 @@ fn modsFromState(state: c_uint) keys.Mods {
 }
 
 // -------------------------------------------------------------------------
+// The clipboard
+// -------------------------------------------------------------------------
+
+fn selectionOf(self: *Impl) Error!*const Selection {
+    if (self.selection) |*made| return made;
+
+    var attributes: XSetWindowAttributes = .{ .event_mask = property_change_mask };
+    const window = self.x.XCreateWindow(self.display, self.root, 0, 0, 1, 1, 0, 0, input_only, null, cw_event_mask, &attributes);
+    if (window == 0) return error.Unavailable;
+
+    const x = self.x;
+    const d = self.display;
+    self.selection = .{
+        .window = window,
+        .clipboard = x.XInternAtom(d, "CLIPBOARD", 0),
+        .targets = x.XInternAtom(d, "TARGETS", 0),
+        .multiple = x.XInternAtom(d, "MULTIPLE", 0),
+        .atom_pair = x.XInternAtom(d, "ATOM_PAIR", 0),
+        .incr = x.XInternAtom(d, "INCR", 0),
+        .utf8_mime = x.XInternAtom(d, "text/plain;charset=utf-8", 0),
+        .manager = x.XInternAtom(d, "CLIPBOARD_MANAGER", 0),
+        .save_targets = x.XInternAtom(d, "SAVE_TARGETS", 0),
+        .property = x.XInternAtom(d, "FLUXION_CLIPBOARD", 0),
+    };
+    return &self.selection.?;
+}
+
+fn setClipboardText(impl: backend.Impl, text: []const u8) Error!void {
+    const self = cast(impl);
+    const selection = try selectionOf(self);
+    self.clipboard_text.clearRetainingCapacity();
+    try self.clipboard_text.appendSlice(self.gpa, text);
+
+    _ = self.x.XSetSelectionOwner(self.display, selection.clipboard, selection.window, current_time);
+    self.owns_clipboard = self.x.XGetSelectionOwner(self.display, selection.clipboard) == selection.window;
+    if (!self.owns_clipboard) return error.Unavailable;
+}
+
+fn clipboardText(impl: backend.Impl, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    const self = cast(impl);
+    const selection = try selectionOf(self);
+    const owner = self.x.XGetSelectionOwner(self.display, selection.clipboard);
+    if (owner == selection.window) return out.appendSlice(gpa, self.clipboard_text.items);
+    if (owner == 0) return;
+
+    if (try convert(self, selection, self.utf8_string, out, gpa)) return;
+    // An owner from before UTF-8 offers Latin-1 and nothing else.
+    var latin1: std.ArrayListUnmanaged(u8) = .empty;
+    defer latin1.deinit(gpa);
+    if (try convert(self, selection, xa_string, &latin1, gpa)) try clipboard.appendLatin1(gpa, out, latin1.items);
+}
+
+/// Asks the owner which types it has - a round trip to another program, which
+/// is why a program should ask when a menu opens rather than every frame.
+fn hasClipboardText(impl: backend.Impl) bool {
+    const self = cast(impl);
+    const selection = selectionOf(self) catch return false;
+    const owner = self.x.XGetSelectionOwner(self.display, selection.clipboard);
+    if (owner == selection.window) return self.clipboard_text.items.len > 0;
+    if (owner == 0) return false;
+
+    var listed: std.ArrayListUnmanaged(u8) = .empty;
+    defer listed.deinit(self.gpa);
+    const answered = convert(self, selection, selection.targets, &listed, self.gpa) catch return false;
+    if (!answered) return false;
+
+    const whole = listed.items[0 .. listed.items.len - listed.items.len % @sizeOf(Atom)];
+    for (std.mem.bytesAsSlice(Atom, whole)) |target| {
+        if (target == self.utf8_string or target == selection.utf8_mime or target == xa_string) return true;
+    }
+    return false;
+}
+
+/// Ask the clipboard's owner for its contents as `target`, wait, and append
+/// what arrives. False when it has nothing of that type or does not answer in
+/// time: an owner that has hung must not hang this program with it.
+fn convert(
+    self: *Impl,
+    selection: *const Selection,
+    target: Atom,
+    out: *std.ArrayListUnmanaged(u8),
+    gpa: Allocator,
+) Error!bool {
+    var ev: XEvent = undefined;
+    // A late answer to an earlier request, which gave up waiting for it.
+    while (self.x.XCheckTypedWindowEvent(self.display, selection.window, selection_notify, &ev) != 0) {}
+    _ = self.x.XDeleteProperty(self.display, selection.window, selection.property);
+    _ = self.x.XConvertSelection(self.display, selection.clipboard, target, selection.property, selection.window, current_time);
+
+    if (!waitForEvent(self, selection.window, selection_notify, &ev, .in(clipboard.timeout_ms))) return false;
+    if (ev.xselection.property == 0) return false;
+    // The owner wrote the property before it answered, so the notice of that
+    // write is already queued. Taken now, it cannot pass for the first piece
+    // of a transfer in pieces.
+    while (self.x.XCheckTypedWindowEvent(self.display, selection.window, property_notify, &ev) != 0) {
+        if (ev.xproperty.atom == selection.property and ev.xproperty.state == property_new_value) break;
+    }
+
+    const start = out.items.len;
+    const kind = try readProperty(self, selection.window, selection.property, out, gpa) orelse return false;
+    if (kind != selection.incr) return true;
+
+    // Too much for one property: reading the first deleted it, which is the
+    // owner's cue to send the rest in pieces. An empty piece is the end.
+    out.shrinkRetainingCapacity(start);
+    while (true) {
+        if (!waitForNewValue(self, selection, .in(clipboard.timeout_ms))) {
+            out.shrinkRetainingCapacity(start);
+            return false;
+        }
+        const before = out.items.len;
+        _ = try readProperty(self, selection.window, selection.property, out, gpa) orelse return false;
+        if (out.items.len == before) return true;
+    }
+}
+
+/// Take the next event of one type for one window out of the queue, reading
+/// the connection until it comes or the deadline passes. Every other event is
+/// left where it was, for the next `pump`.
+fn waitForEvent(self: *Impl, window: Window, kind: c_int, ev: *XEvent, deadline: clipboard.Deadline) bool {
+    while (self.x.XCheckTypedWindowEvent(self.display, window, kind, ev) == 0) {
+        const left = deadline.left();
+        if (left == 0) return false;
+        var fds = [_]Pollfd{.{ .fd = self.x.XConnectionNumber(self.display), .events = pollin, .revents = 0 }};
+        _ = c.poll(&fds, 1, left);
+    }
+    return true;
+}
+
+fn waitForNewValue(self: *Impl, selection: *const Selection, deadline: clipboard.Deadline) bool {
+    var ev: XEvent = undefined;
+    while (waitForEvent(self, selection.window, property_notify, &ev, deadline)) {
+        if (ev.xproperty.atom == selection.property and ev.xproperty.state == property_new_value) return true;
+    }
+    return false;
+}
+
+/// Append a property's value and delete it. Answers its type, or null where
+/// there was no such property.
+fn readProperty(
+    self: *Impl,
+    window: Window,
+    property: Atom,
+    out: *std.ArrayListUnmanaged(u8),
+    gpa: Allocator,
+) Error!?Atom {
+    var kind: Atom = 0;
+    var format: c_int = 0;
+    var count: c_ulong = 0;
+    var after: c_ulong = 0;
+    var data: ?[*]u8 = null;
+    const status = self.x.XGetWindowProperty(
+        self.display,
+        window,
+        property,
+        0,
+        std.math.maxInt(c_long),
+        1,
+        any_property_type,
+        &kind,
+        &format,
+        &count,
+        &after,
+        &data,
+    );
+    if (status != 0) return null;
+    defer if (data) |bytes| {
+        _ = self.x.XFree(bytes);
+    };
+    if (kind == 0) return null;
+
+    // Format 32 is a `long` each, as it is everywhere in Xlib.
+    const unit: usize = switch (format) {
+        8 => 1,
+        16 => 2,
+        32 => @sizeOf(c_long),
+        else => return null,
+    };
+    if (data) |bytes| try out.appendSlice(gpa, bytes[0 .. @as(usize, @intCast(count)) * unit]);
+    return kind;
+}
+
+/// Something happened on the clipboard's window: another program asking for
+/// what this one copied, or taking the clipboard over.
+fn selectionEvent(self: *Impl, selection: *const Selection, ev: *const XEvent) void {
+    switch (ev.type) {
+        selection_request => answer(self, selection, &ev.xselectionrequest),
+        selection_clear => if (ev.xselectionclear.selection == selection.clipboard) {
+            self.owns_clipboard = false;
+            self.clipboard_text.clearAndFree(self.gpa);
+        },
+        // Late answers, and this window's own property changing.
+        else => {},
+    }
+}
+
+fn answer(self: *Impl, selection: *const Selection, request: *const XSelectionRequestEvent) void {
+    // The asker's window may be gone by now, and Xlib's own answer to that
+    // error is to end the process.
+    const previous = self.x.XSetErrorHandler(ignoreError);
+    defer {
+        _ = self.x.XSync(self.display, 0);
+        _ = self.x.XSetErrorHandler(previous);
+    }
+
+    // A client from before ICCCM 2.0 names no property, and means the target.
+    const property = if (request.property != 0) request.property else request.target;
+    const converted = self.owns_clipboard and request.selection == selection.clipboard and
+        convertFor(self, selection, request.requestor, request.target, property);
+
+    var reply: XEvent = std.mem.zeroes(XEvent);
+    reply.xselection = .{
+        .type = selection_notify,
+        .serial = 0,
+        .send_event = 1,
+        .display = self.display,
+        .requestor = request.requestor,
+        .selection = request.selection,
+        .target = request.target,
+        .property = if (converted) property else 0,
+        .time = request.time,
+    };
+    _ = self.x.XSendEvent(self.display, request.requestor, 0, 0, &reply);
+}
+
+/// Write what this program copied onto the asker's property, as `target`.
+fn convertFor(self: *Impl, selection: *const Selection, requestor: Window, target: Atom, property: Atom) bool {
+    if (target == selection.targets) {
+        const offered = [_]Atom{ selection.targets, selection.multiple, self.utf8_string, selection.utf8_mime };
+        _ = self.x.XChangeProperty(self.display, requestor, property, xa_atom, 32, prop_mode_replace, @ptrCast(&offered), offered.len);
+        return true;
+    }
+    if (target == self.utf8_string or target == selection.utf8_mime) {
+        const text = self.clipboard_text.items;
+        // More than the server takes in one request, which would fail and
+        // leave the asker reading nothing.
+        if (text.len > maxPropertyBytes(self)) return false;
+        _ = self.x.XChangeProperty(self.display, requestor, property, target, 8, prop_mode_replace, text.ptr, @intCast(text.len));
+        return true;
+    }
+    if (target == selection.multiple) return convertMultiple(self, selection, requestor, property);
+    return false;
+}
+
+/// Several conversions in one request, which is how a clipboard manager takes
+/// everything at once: pairs of target and property, and a pair that could
+/// not be converted has its property set to none.
+fn convertMultiple(self: *Impl, selection: *const Selection, requestor: Window, property: Atom) bool {
+    var kind: Atom = 0;
+    var format: c_int = 0;
+    var count: c_ulong = 0;
+    var after: c_ulong = 0;
+    var data: ?[*]u8 = null;
+    const status = self.x.XGetWindowProperty(
+        self.display,
+        requestor,
+        property,
+        0,
+        std.math.maxInt(c_long),
+        0,
+        selection.atom_pair,
+        &kind,
+        &format,
+        &count,
+        &after,
+        &data,
+    );
+    if (status != 0) return false;
+    const bytes = data orelse return false;
+    defer _ = self.x.XFree(bytes);
+    if (kind != selection.atom_pair or format != 32) return false;
+
+    const pairs: [*]Atom = @ptrCast(@alignCast(bytes));
+    var at: usize = 0;
+    while (at + 1 < count) : (at += 2) {
+        const nested = pairs[at] == selection.multiple;
+        if (nested or !convertFor(self, selection, requestor, pairs[at], pairs[at + 1])) pairs[at + 1] = 0;
+    }
+    _ = self.x.XChangeProperty(self.display, requestor, property, selection.atom_pair, 32, prop_mode_replace, bytes, @intCast(count));
+    return true;
+}
+
+/// The most one request carries, less room for its header. The server counts
+/// in four-byte words.
+fn maxPropertyBytes(self: *Impl) usize {
+    const extended = self.x.XExtendedMaxRequestSize(self.display);
+    const words = if (extended > 0) extended else self.x.XMaxRequestSize(self.display);
+    return @as(usize, @intCast(@max(words - 64, 0))) * 4;
+}
+
+fn ignoreError(display: ?*Display, err: ?*anyopaque) callconv(.c) c_int {
+    _ = .{ display, err };
+    return 0;
+}
+
+/// Give what this program copied to a clipboard manager before the window
+/// that owns it - and the text with it - goes away. The freedesktop convention
+/// for what Windows does without being asked; with no manager running, the
+/// text leaves with the program.
+fn handOver(self: *Impl, selection: *const Selection) void {
+    if (!self.owns_clipboard) return;
+    if (self.x.XGetSelectionOwner(self.display, selection.clipboard) != selection.window) return;
+    if (self.x.XGetSelectionOwner(self.display, selection.manager) == 0) return;
+
+    _ = self.x.XConvertSelection(self.display, selection.manager, selection.save_targets, 0, selection.window, current_time);
+    const deadline = clipboard.Deadline.in(clipboard.timeout_ms);
+    var ev: XEvent = undefined;
+    while (true) {
+        while (self.x.XCheckTypedWindowEvent(self.display, selection.window, selection_request, &ev) != 0) {
+            answer(self, selection, &ev.xselectionrequest);
+        }
+        if (self.x.XCheckTypedWindowEvent(self.display, selection.window, selection_notify, &ev) != 0) {
+            if (ev.xselection.selection == selection.manager) return;
+            continue;
+        }
+        const left = deadline.left();
+        if (left == 0) return;
+        var fds = [_]Pollfd{.{ .fd = self.x.XConnectionNumber(self.display), .events = pollin, .revents = 0 }};
+        _ = c.poll(&fds, 1, left);
+    }
+}
+
+// -------------------------------------------------------------------------
 // Keycodes
 // -------------------------------------------------------------------------
 
@@ -2444,9 +2891,22 @@ test "the event structs are the size Xlib says they are" {
         XExposeEvent,
         XConfigureEvent,
         XClientMessageEvent,
+        XPropertyEvent,
+        XSelectionClearEvent,
+        XSelectionRequestEvent,
+        XSelectionEvent,
     }) |T| {
         try testing.expect(@sizeOf(T) <= @sizeOf(XEvent));
     }
+}
+
+test "every selection event names the clipboard's window where xany reads it" {
+    try testing.expectEqual(@offsetOf(XAnyEvent, "window"), @offsetOf(XSelectionRequestEvent, "owner"));
+    try testing.expectEqual(@offsetOf(XAnyEvent, "window"), @offsetOf(XSelectionEvent, "requestor"));
+    try testing.expectEqual(@offsetOf(XAnyEvent, "window"), @offsetOf(XSelectionClearEvent, "window"));
+    try testing.expectEqual(@offsetOf(XAnyEvent, "window"), @offsetOf(XPropertyEvent, "window"));
+    try testing.expectEqual(10 * @sizeOf(c_long), @sizeOf(XSelectionRequestEvent));
+    try testing.expectEqual(9 * @sizeOf(c_long), @sizeOf(XSelectionEvent));
 }
 
 test "the shared prefix of every event is at the same offset" {

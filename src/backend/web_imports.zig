@@ -147,3 +147,15 @@ pub extern "fluxion_platform" fn droppedSize(index: u32) i32;
 /// Copy the `index`th dropped file into `ptr[0..len]`. Answers how many bytes
 /// were copied.
 pub extern "fluxion_platform" fn droppedRead(index: u32, ptr: [*]u8, len: u32) u32;
+
+/// Put text on the clipboard - now if the browser agrees, or inside the next
+/// key press or click if it wants one. Zero where the page has no way to.
+pub extern "fluxion_platform" fn setClipboard(ptr: [*]const u8, len: u32) u32;
+
+/// How many bytes of UTF-8 the clipboard's text is, as far as the page knows
+/// it - the last paste it heard, or what was put there since - or -1 when it
+/// knows nothing.
+pub extern "fluxion_platform" fn clipboardSize() i32;
+
+/// Copy that text into `ptr[0..len]`. Answers how many bytes were copied.
+pub extern "fluxion_platform" fn clipboardRead(ptr: [*]u8, len: u32) u32;

@@ -39,6 +39,7 @@ const text_mod = @import("../text.zig");
 const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
 const virtual_key = @import("virtual_key.zig");
+const clipboard = @import("clipboard.zig");
 
 const Error = platform.Error;
 
@@ -459,6 +460,12 @@ const User32 = struct {
     SetForegroundWindow: *const fn (HWND) callconv(.winapi) i32,
     FlashWindow: *const fn (HWND, i32) callconv(.winapi) i32,
     ClientToScreen: *const fn (HWND, *Point) callconv(.winapi) i32,
+    OpenClipboard: *const fn (?HWND) callconv(.winapi) i32,
+    CloseClipboard: *const fn () callconv(.winapi) i32,
+    EmptyClipboard: *const fn () callconv(.winapi) i32,
+    SetClipboardData: *const fn (u32, ?*anyopaque) callconv(.winapi) ?*anyopaque,
+    GetClipboardData: *const fn (u32) callconv(.winapi) ?*anyopaque,
+    IsClipboardFormatAvailable: *const fn (u32) callconv(.winapi) i32,
     /// Layered-window transparency. Windows 2000 and later, so present
     /// everywhere this library runs, but optional rather than assumed.
     SetLayeredWindowAttributes: ?*const fn (HWND, u32, u8, u32) callconv(.winapi) i32 = null,
@@ -472,7 +479,23 @@ const User32 = struct {
 
 const Kernel32 = struct {
     GetModuleHandleW: *const fn (?[*:0]const u16) callconv(.winapi) ?HINSTANCE,
+    /// The clipboard takes its text as a movable global block, which it then
+    /// owns - the one allocator it will accept.
+    GlobalAlloc: *const fn (u32, usize) callconv(.winapi) ?*anyopaque,
+    GlobalFree: *const fn (?*anyopaque) callconv(.winapi) ?*anyopaque,
+    GlobalLock: *const fn (?*anyopaque) callconv(.winapi) ?*anyopaque,
+    GlobalUnlock: *const fn (?*anyopaque) callconv(.winapi) i32,
+    GlobalSize: *const fn (?*anyopaque) callconv(.winapi) usize,
+    Sleep: *const fn (u32) callconv(.winapi) void,
 };
+
+/// `CF_UNICODETEXT`. Windows makes the other text formats from it, and it from
+/// them, so it is the only one to write and the only one to ask for.
+const cf_unicodetext: u32 = 13;
+const gmem_moveable: u32 = 0x0002;
+/// `HWND_MESSAGE`: the parent that makes a window message-only - never shown,
+/// never enumerated, there only to be named.
+const hwnd_message: ?HWND = @ptrFromInt(@as(usize, @bitCast(@as(isize, -3))));
 
 /// Only for a monitor's size in millimetres, which is the one thing `user32`
 /// will not say. A machine without it reports zero rather than failing.
@@ -550,6 +573,9 @@ const Impl = struct {
     /// Set when pushing an event ran out of memory. Reported by `pump`, because
     /// a window procedure has no way to fail.
     push_failed: bool = false,
+    /// What owns the text this program puts on the clipboard. Made on the first
+    /// copy; see `clipboardOwner`.
+    clipboard_owner: ?HWND = null,
 };
 
 const Native = struct {
@@ -626,6 +652,9 @@ pub const vtable: backend.Vtable = .{
     .setTextInput = setTextInput,
     .setTextInputArea = setTextInputArea,
     .preedit = preedit,
+    .setClipboardText = setClipboardText,
+    .clipboardText = clipboardText,
+    .hasClipboardText = hasClipboardText,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -723,6 +752,8 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
 
 fn deinit(impl: backend.Impl, gpa: Allocator) void {
     const self = cast(impl);
+    // The text stays on the clipboard: it was handed over, not lent.
+    if (self.clipboard_owner) |hwnd| _ = self.u.DestroyWindow(hwnd);
     _ = self.u.UnregisterClassW(class_name, self.instance);
     self.pads.close();
     self.gl.close();
@@ -1026,6 +1057,90 @@ fn readComposition(self: *Impl, native: *Native) void {
 
 fn pushPreedit(self: *Impl, native: *Native) void {
     push(self, .{ .preedit = native.id });
+}
+
+// -------------------------------------------------------------------------
+// The clipboard
+// -------------------------------------------------------------------------
+
+/// A message-only window to own what this program copies. `SetClipboardData`
+/// fails after an `OpenClipboard` that named no window, and naming one of the
+/// program's own would tie the clipboard to a window it may close.
+fn clipboardOwner(self: *Impl) Error!HWND {
+    if (self.clipboard_owner) |hwnd| return hwnd;
+    const hwnd = self.u.CreateWindowExW(
+        0,
+        class_name,
+        std.unicode.utf8ToUtf16LeStringLiteral("fluxion.clipboard"),
+        0,
+        0,
+        0,
+        0,
+        0,
+        hwnd_message,
+        null,
+        self.instance,
+        null,
+    ) orelse return error.Unavailable;
+    self.clipboard_owner = hwnd;
+    return hwnd;
+}
+
+/// `OpenClipboard`, a few times over: a clipboard viewer or a remote desktop
+/// may be holding it for a moment, and one try would lose to them.
+fn openClipboard(self: *Impl, owner: ?HWND) Error!void {
+    for (0..5) |_| {
+        if (self.u.OpenClipboard(owner) != 0) return;
+        self.k.Sleep(5);
+    }
+    return error.Unavailable;
+}
+
+/// As `CF_UNICODETEXT`, with `\r\n` between lines, which is what every
+/// Windows program expects to paste. Filled in before the clipboard is opened,
+/// so it is held for as short a time as it can be.
+fn setClipboardText(impl: backend.Impl, text: []const u8) Error!void {
+    const self = cast(impl);
+    const owner = try clipboardOwner(self);
+
+    const units = clipboard.utf16Len(text, .crlf);
+    const memory = self.k.GlobalAlloc(gmem_moveable, (units + 1) * @sizeOf(u16)) orelse
+        return error.OutOfMemory;
+    var handed_over = false;
+    defer if (!handed_over) {
+        _ = self.k.GlobalFree(memory);
+    };
+
+    const locked: [*]u16 = @ptrCast(@alignCast(self.k.GlobalLock(memory) orelse return error.OutOfMemory));
+    clipboard.toUtf16(text, .crlf, locked[0..units]);
+    locked[units] = 0;
+    _ = self.k.GlobalUnlock(memory);
+
+    try openClipboard(self, owner);
+    defer _ = self.u.CloseClipboard();
+    if (self.u.EmptyClipboard() == 0) return error.Unavailable;
+    if (self.u.SetClipboardData(cf_unicodetext, memory) == null) return error.Unavailable;
+    handed_over = true;
+}
+
+fn clipboardText(impl: backend.Impl, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    const self = cast(impl);
+    if (self.u.IsClipboardFormatAvailable(cf_unicodetext) == 0) return;
+
+    try openClipboard(self, null);
+    defer _ = self.u.CloseClipboard();
+
+    const memory = self.u.GetClipboardData(cf_unicodetext) orelse return;
+    const locked = self.k.GlobalLock(memory) orelse return;
+    defer _ = self.k.GlobalUnlock(memory);
+
+    // The block may be larger than the text, which ends at its terminator.
+    const all = @as([*]const u16, @ptrCast(@alignCast(locked)))[0 .. self.k.GlobalSize(memory) / @sizeOf(u16)];
+    try clipboard.appendUtf16(gpa, out, all[0 .. std.mem.indexOfScalar(u16, all, 0) orelse all.len]);
+}
+
+fn hasClipboardText(impl: backend.Impl) bool {
+    return cast(impl).u.IsClipboardFormatAvailable(cf_unicodetext) != 0;
 }
 
 fn createVulkanSurface(

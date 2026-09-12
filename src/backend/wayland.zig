@@ -53,6 +53,7 @@ const platform = @import("../platform.zig");
 const evdev = @import("evdev.zig");
 const virtual_key = @import("virtual_key.zig");
 const cursor_mod = @import("../cursor.zig");
+const clipboard = @import("clipboard.zig");
 
 const Error = platform.Error;
 
@@ -85,6 +86,7 @@ const Pollfd = extern struct {
 };
 
 const pollin: c_short = 0x001;
+const pollout: c_short = 0x004;
 
 // -------------------------------------------------------------------------
 // The wire ABI
@@ -163,6 +165,7 @@ const Wayland = struct {
     wl_proxy_add_listener: *const fn (*Proxy, *const anyopaque, ?*anyopaque) callconv(.c) c_int,
     wl_proxy_destroy: *const fn (*Proxy) callconv(.c) void,
     wl_proxy_get_version: *const fn (*Proxy) callconv(.c) u32,
+    wl_proxy_get_user_data: *const fn (*Proxy) callconv(.c) ?*anyopaque,
 };
 
 /// The core protocol's descriptors, which live inside the library.
@@ -181,6 +184,10 @@ const CoreInterfaces = struct {
     wl_output_interface: *const WlInterface,
     wl_region_interface: *const WlInterface,
     wl_shm_interface: *const WlInterface,
+    wl_data_device_manager_interface: *const WlInterface,
+    wl_data_device_interface: *const WlInterface,
+    wl_data_source_interface: *const WlInterface,
+    wl_data_offer_interface: *const WlInterface,
 
     /// Every name, fetched one at a time. A missing one means this is not a
     /// `libwayland-client`, whatever the file was called.
@@ -298,6 +305,22 @@ const toplevel_set_minimized: u32 = 13;
 /// `wl_output.release`, which exists from version 3. Below that an output is
 /// let go by destroying the proxy and nothing else.
 const output_release: u32 = 0;
+
+const data_device_manager_create_data_source: u32 = 0;
+const data_device_manager_get_data_device: u32 = 1;
+const data_device_set_selection: u32 = 1;
+/// From version 2, like `wl_output.release`.
+const data_device_release: u32 = 2;
+const data_source_offer: u32 = 0;
+const data_source_destroy: u32 = 1;
+const data_offer_receive: u32 = 1;
+const data_offer_destroy: u32 = 2;
+
+/// The names text goes by, best first: what a paste asks the owner for.
+const text_types = [_][:0]const u8{ "text/plain;charset=utf-8", "UTF8_STRING", "text/plain" };
+/// And what a copy offers, which every toolkit and Xwayland asks for by one
+/// of these names.
+const offered_types = [_][:0]const u8{ "text/plain;charset=utf-8", "text/plain", "UTF8_STRING" };
 
 /// `wl_seat.capabilities` bits.
 const seat_pointer: u32 = 1;
@@ -639,6 +662,27 @@ const Impl = struct {
 
     windows: std.AutoArrayHashMapUnmanaged(usize, *Native) = .empty,
     wake: if (has_display) [2]c_int else void = if (has_display) .{ -1, -1 } else {},
+
+    /// The clipboard: the seat's data device, the offers it makes, and the
+    /// source that serves what this program copied.
+    data_manager: ?*Proxy = null,
+    data_device: ?*Proxy = null,
+    /// Introduced by `data_offer` and named by the event that follows: the
+    /// clipboard's contents, or a drag passing over a window.
+    new_offer: ?*Offer = null,
+    selection_offer: ?*Offer = null,
+    drag_offer: ?*Offer = null,
+    source: ?*Proxy = null,
+    clipboard_text: std.ArrayListUnmanaged(u8) = .empty,
+    /// The serial of the last key or click, which a request for the clipboard
+    /// has to name.
+    input_serial: u32 = 0,
+};
+
+/// One `wl_data_offer`, and the best of `text_types` it has said it can give.
+const Offer = struct {
+    proxy: *Proxy,
+    text: ?usize = null,
 };
 
 /// One display, as its events arrive.
@@ -781,6 +825,9 @@ pub const vtable: backend.Vtable = .{
     .setTextInput = setTextInput,
     .setTextInputArea = setTextInputArea,
     .preedit = preedit,
+    .setClipboardText = setClipboardText,
+    .clipboardText = clipboardText,
+    .hasClipboardText = hasClipboardText,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -911,6 +958,22 @@ fn bindGlobals(self: *Impl) Error!void {
     // Without these there is no way to put anything on screen, and saying so
     // here beats failing later with a null pointer.
     if (self.compositor == null or self.wm_base == null) return error.ConnectionFailed;
+
+    // The clipboard's, made now rather than when it is first used: the
+    // compositor says what the clipboard holds when a window gains the
+    // keyboard, and a device made later would have missed hearing it.
+    const manager = self.data_manager orelse return;
+    const seat = self.seat orelse return;
+    var device_args = [_]WlArgument{ .{ .n = 0 }, .{ .o = seat } };
+    self.data_device = construct(
+        self,
+        manager,
+        data_device_manager_get_data_device,
+        self.core.wl_data_device_interface,
+        w.wl_proxy_get_version(manager),
+        &device_args,
+    );
+    if (self.data_device) |device| _ = w.wl_proxy_add_listener(device, &data_device_listener, self);
 }
 
 /// Open `libwayland-cursor` and load the user's theme.
@@ -1174,6 +1237,16 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     if (self.relative_manager) |p| w.wl_proxy_destroy(p);
     if (self.shm) |p| w.wl_proxy_destroy(p);
 
+    if (self.new_offer) |offer| destroyOffer(self, offer);
+    if (self.selection_offer) |offer| destroyOffer(self, offer);
+    if (self.drag_offer) |offer| destroyOffer(self, offer);
+    if (self.source) |source| requestDestroy(self, source, data_source_destroy);
+    if (self.data_device) |device| {
+        if (w.wl_proxy_get_version(device) >= 2) requestDestroy(self, device, data_device_release) else w.wl_proxy_destroy(device);
+    }
+    if (self.data_manager) |manager| w.wl_proxy_destroy(manager);
+    self.clipboard_text.deinit(gpa);
+
     if (self.pointer) |p| requestDestroy(self, p, pointer_release);
     if (self.keyboard) |k| requestDestroy(self, k, keyboard_release);
     if (self.seat) |s| w.wl_proxy_destroy(s);
@@ -1254,6 +1327,8 @@ fn onGlobal(
         if (self.seat) |seat| {
             _ = self.w.wl_proxy_add_listener(seat, &seat_listener, self);
         }
+    } else if (std.mem.eql(u8, text, "wl_data_device_manager")) {
+        self.data_manager = bindGlobal(self, registry, name, self.core.wl_data_device_manager_interface, @min(version, 3));
     }
 }
 
@@ -1678,6 +1753,7 @@ fn onPointerEnter(
     // Kept whatever the surface turns out to be: `set_cursor` needs the serial
     // of the last enter, and nothing else carries one.
     self.enter_serial = serial;
+    self.input_serial = serial;
 
     const native = self.windows.get(@intFromPtr(surface)) orelse return;
 
@@ -1731,8 +1807,9 @@ fn onPointerButton(
     button: u32,
     state: u32,
 ) callconv(.c) void {
-    _ = .{ proxy, serial, time };
+    _ = .{ proxy, time };
     const self: *Impl = @ptrCast(@alignCast(data.?));
+    self.input_serial = serial;
     const native = self.pointer_focus orelse return;
 
     push(self, .{ .mouse_button = .{
@@ -1845,10 +1922,11 @@ fn onKeyboardEnter(
     surface: *Proxy,
     pressed: *WlArray,
 ) callconv(.c) void {
-    _ = .{ proxy, serial, pressed };
+    _ = .{ proxy, pressed };
     const self: *Impl = @ptrCast(@alignCast(data.?));
     const native = self.windows.get(@intFromPtr(surface)) orelse return;
 
+    self.input_serial = serial;
     self.keyboard_focus = native;
     push(self, .{ .focus = .{ .window = native.id, .value = true } });
 }
@@ -1870,8 +1948,9 @@ fn onKey(
     key: u32,
     state: u32,
 ) callconv(.c) void {
-    _ = .{ proxy, serial, time };
+    _ = .{ proxy, time };
     const self: *Impl = @ptrCast(@alignCast(data.?));
+    self.input_serial = serial;
     const native = self.keyboard_focus orelse return;
 
     // The kernel's own code, with no offset - unlike X11, which adds eight.
@@ -2293,6 +2372,274 @@ fn preedit(impl: backend.Impl) ?*const text_mod.Preedit {
     return &cast(impl).preedit;
 }
 
+// -------------------------------------------------------------------------
+// The clipboard
+//
+// The compositor keeps no text either. A copy is a data source that offers
+// types and writes its contents down a pipe whenever the compositor passes on
+// a request; a paste is a data offer, which a program asks to write to a pipe
+// of its own. The compositor says what the clipboard offers only to the
+// program with the keyboard, and takes the clipboard only from that program.
+// -------------------------------------------------------------------------
+
+fn setClipboardText(impl: backend.Impl, text: []const u8) Error!void {
+    const self = cast(impl);
+    const manager = self.data_manager orelse return error.Unavailable;
+    const device = self.data_device orelse return error.Unavailable;
+    // The request has to name the last key or click, to prove the program
+    // was being used.
+    if (self.keyboard_focus == null or self.input_serial == 0) return error.Unavailable;
+
+    self.clipboard_text.clearRetainingCapacity();
+    try self.clipboard_text.appendSlice(self.gpa, text);
+
+    var args = [_]WlArgument{.{ .n = 0 }};
+    const source = construct(
+        self,
+        manager,
+        data_device_manager_create_data_source,
+        self.core.wl_data_source_interface,
+        self.w.wl_proxy_get_version(manager),
+        &args,
+    ) orelse return error.Unavailable;
+    _ = self.w.wl_proxy_add_listener(source, &data_source_listener, self);
+    for (offered_types) |mime| {
+        var offer = [_]WlArgument{.{ .s = mime.ptr }};
+        request(self, source, data_source_offer, &offer);
+    }
+    var select = [_]WlArgument{ .{ .o = source }, .{ .u = self.input_serial } };
+    request(self, device, data_device_set_selection, &select);
+
+    // Replaced: left alive, it would be asked for the new text.
+    if (self.source) |old| requestDestroy(self, old, data_source_destroy);
+    self.source = source;
+    _ = self.w.wl_display_flush(self.display);
+}
+
+fn clipboardText(impl: backend.Impl, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    const self = cast(impl);
+    if (self.data_device == null) return error.Unavailable;
+    // This program's own. Asked through the compositor, the request would
+    // come back to a program busy waiting for its answer.
+    if (self.source != null) return out.appendSlice(gpa, self.clipboard_text.items);
+    const offer = self.selection_offer orelse return;
+    const best = offer.text orelse return;
+    try receive(self, offer.proxy, text_types[best], out, gpa);
+}
+
+fn hasClipboardText(impl: backend.Impl) bool {
+    const self = cast(impl);
+    if (self.source != null) return self.clipboard_text.items.len > 0;
+    const offer = self.selection_offer orelse return false;
+    return offer.text != null;
+}
+
+/// Have the clipboard's owner write it down a pipe, and read until the owner
+/// closes it - or until it goes quiet for longer than `clipboard.timeout_ms`,
+/// which leaves nothing rather than half.
+fn receive(self: *Impl, offer: *Proxy, mime: [:0]const u8, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    if (comptime !has_display) return;
+    var fds: [2]c_int = .{ -1, -1 };
+    if (c.pipe(&fds) != 0) return error.Unavailable;
+    defer _ = c.close(fds[0]);
+
+    var args = [_]WlArgument{ .{ .s = mime.ptr }, .{ .h = fds[1] } };
+    request(self, offer, data_offer_receive, &args);
+    _ = self.w.wl_display_flush(self.display);
+    // The request carried a copy. With this one closed, the pipe ends when the
+    // owner's copy does.
+    _ = c.close(fds[1]);
+
+    const start = out.items.len;
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        var ready = [_]Pollfd{.{ .fd = fds[0], .events = pollin, .revents = 0 }};
+        const polled = c.poll(&ready, 1, clipboard.timeout_ms);
+        if (polled < 0 and std.c.errno(polled) == .INTR) continue;
+        if (polled <= 0) break;
+        const n = c.read(fds[0], &chunk, chunk.len);
+        if (n == 0) return;
+        if (n < 0) {
+            if (std.c.errno(n) == .INTR) continue;
+            break;
+        }
+        try out.appendSlice(gpa, chunk[0..@intCast(n)]);
+    }
+    out.shrinkRetainingCapacity(start);
+}
+
+/// Write `bytes` down a pipe to the program pasting them, giving up if it
+/// stops reading. SIGPIPE is ignored for the length of it: a reader that
+/// closes its end early would otherwise end this process.
+fn writeAll(fd: c_int, bytes: []const u8) void {
+    const ignore: std.posix.Sigaction = .{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    var previous: std.posix.Sigaction = undefined;
+    std.posix.sigaction(.PIPE, &ignore, &previous);
+    defer std.posix.sigaction(.PIPE, &previous, null);
+
+    var sent: usize = 0;
+    while (sent < bytes.len) {
+        var ready = [_]Pollfd{.{ .fd = fd, .events = pollout, .revents = 0 }};
+        const polled = c.poll(&ready, 1, clipboard.timeout_ms);
+        if (polled < 0 and std.c.errno(polled) == .INTR) continue;
+        if (polled <= 0) return;
+        const n = c.write(fd, bytes[sent..].ptr, @min(bytes.len - sent, 4096));
+        if (n < 0) {
+            if (std.c.errno(n) == .INTR) continue;
+            return;
+        }
+        sent += @intCast(n);
+    }
+}
+
+fn destroyOffer(self: *Impl, offer: *Offer) void {
+    requestDestroy(self, offer.proxy, data_offer_destroy);
+    self.gpa.destroy(offer);
+}
+
+/// The offer a `data_offer` event introduced, found through its proxy.
+fn offerOf(self: *Impl, proxy: ?*Proxy) ?*Offer {
+    const named = proxy orelse return null;
+    const raw = self.w.wl_proxy_get_user_data(named) orelse return null;
+    const offer: *Offer = @ptrCast(@alignCast(raw));
+    if (self.new_offer == offer) self.new_offer = null;
+    return offer;
+}
+
+const DataDeviceListener = extern struct {
+    data_offer: *const fn (?*anyopaque, *Proxy, *Proxy) callconv(.c) void,
+    enter: *const fn (?*anyopaque, *Proxy, u32, ?*Proxy, Fixed, Fixed, ?*Proxy) callconv(.c) void,
+    leave: *const fn (?*anyopaque, *Proxy) callconv(.c) void,
+    motion: *const fn (?*anyopaque, *Proxy, u32, Fixed, Fixed) callconv(.c) void,
+    drop: *const fn (?*anyopaque, *Proxy) callconv(.c) void,
+    selection: *const fn (?*anyopaque, *Proxy, ?*Proxy) callconv(.c) void,
+};
+
+const data_device_listener: DataDeviceListener = .{
+    .data_offer = onDataOffer,
+    .enter = onDragEnter,
+    .leave = onDragEnd,
+    .motion = onDragMotion,
+    .drop = onDragEnd,
+    .selection = onSelection,
+};
+
+fn onDataOffer(data: ?*anyopaque, device: *Proxy, proxy: *Proxy) callconv(.c) void {
+    _ = device;
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    if (self.new_offer) |unnamed| destroyOffer(self, unnamed);
+    self.new_offer = null;
+
+    const offer = self.gpa.create(Offer) catch {
+        requestDestroy(self, proxy, data_offer_destroy);
+        return;
+    };
+    offer.* = .{ .proxy = proxy };
+    _ = self.w.wl_proxy_add_listener(proxy, &data_offer_listener, offer);
+    self.new_offer = offer;
+}
+
+fn onSelection(data: ?*anyopaque, device: *Proxy, proxy: ?*Proxy) callconv(.c) void {
+    _ = device;
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    if (self.selection_offer) |old| destroyOffer(self, old);
+    self.selection_offer = offerOf(self, proxy);
+}
+
+/// A drag passing over a window. Nothing here accepts one yet, so its offer
+/// is only kept to be let go of when the drag leaves or drops.
+fn onDragEnter(
+    data: ?*anyopaque,
+    device: *Proxy,
+    serial: u32,
+    surface: ?*Proxy,
+    x: Fixed,
+    y: Fixed,
+    proxy: ?*Proxy,
+) callconv(.c) void {
+    _ = .{ device, serial, surface, x, y };
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    if (self.drag_offer) |old| destroyOffer(self, old);
+    self.drag_offer = offerOf(self, proxy);
+}
+
+fn onDragEnd(data: ?*anyopaque, device: *Proxy) callconv(.c) void {
+    _ = device;
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    if (self.drag_offer) |old| destroyOffer(self, old);
+    self.drag_offer = null;
+}
+
+fn onDragMotion(data: ?*anyopaque, device: *Proxy, time: u32, x: Fixed, y: Fixed) callconv(.c) void {
+    _ = .{ data, device, time, x, y };
+}
+
+const DataOfferListener = extern struct {
+    offer: *const fn (?*anyopaque, *Proxy, [*:0]const u8) callconv(.c) void,
+    source_actions: *const fn (?*anyopaque, *Proxy, u32) callconv(.c) void,
+    action: *const fn (?*anyopaque, *Proxy, u32) callconv(.c) void,
+};
+
+const data_offer_listener: DataOfferListener = .{
+    .offer = onOfferType,
+    .source_actions = ignore2,
+    .action = ignore2,
+};
+
+fn onOfferType(data: ?*anyopaque, proxy: *Proxy, mime: [*:0]const u8) callconv(.c) void {
+    _ = proxy;
+    const offer: *Offer = @ptrCast(@alignCast(data.?));
+    const name = std.mem.span(mime);
+    for (text_types, 0..) |candidate, rank| {
+        if (!std.mem.eql(u8, name, candidate)) continue;
+        if (offer.text == null or rank < offer.text.?) offer.text = rank;
+    }
+}
+
+const DataSourceListener = extern struct {
+    target: *const fn (?*anyopaque, *Proxy, ?[*:0]const u8) callconv(.c) void,
+    send: *const fn (?*anyopaque, *Proxy, [*:0]const u8, i32) callconv(.c) void,
+    cancelled: *const fn (?*anyopaque, *Proxy) callconv(.c) void,
+    dnd_drop_performed: *const fn (?*anyopaque, *Proxy) callconv(.c) void,
+    dnd_finished: *const fn (?*anyopaque, *Proxy) callconv(.c) void,
+    action: *const fn (?*anyopaque, *Proxy, u32) callconv(.c) void,
+};
+
+const data_source_listener: DataSourceListener = .{
+    .target = onSourceTarget,
+    .send = onSourceSend,
+    .cancelled = onSourceCancelled,
+    .dnd_drop_performed = ignore1,
+    .dnd_finished = ignore1,
+    .action = ignore2,
+};
+
+fn onSourceTarget(data: ?*anyopaque, source: *Proxy, mime: ?[*:0]const u8) callconv(.c) void {
+    _ = .{ data, source, mime };
+}
+
+/// Another program is pasting what this one copied.
+fn onSourceSend(data: ?*anyopaque, source: *Proxy, mime: [*:0]const u8, fd: i32) callconv(.c) void {
+    _ = mime;
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    defer _ = c.close(fd);
+    if (self.source != source) return;
+    writeAll(fd, self.clipboard_text.items);
+}
+
+/// Another program has taken the clipboard.
+fn onSourceCancelled(data: ?*anyopaque, source: *Proxy) callconv(.c) void {
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    requestDestroy(self, source, data_source_destroy);
+    if (self.source != source) return;
+    self.source = null;
+    self.clipboard_text.clearAndFree(self.gpa);
+}
+
 fn createVulkanSurface(
     impl: backend.Impl,
     native: backend.NativeWindow,
@@ -2592,6 +2939,10 @@ fn fakeCore() CoreInterfaces {
         .wl_output_interface = &stub.iface,
         .wl_region_interface = &stub.iface,
         .wl_shm_interface = &stub.iface,
+        .wl_data_device_manager_interface = &stub.iface,
+        .wl_data_device_interface = &stub.iface,
+        .wl_data_source_interface = &stub.iface,
+        .wl_data_offer_interface = &stub.iface,
     };
 }
 
@@ -2738,11 +3089,39 @@ test "a listener is one function pointer per event, in order" {
     try testing.expectEqual(@as(usize, 2), @typeInfo(SeatListener).@"struct".fields.len);
     try testing.expectEqual(@as(usize, 6), @typeInfo(KeyboardListener).@"struct".fields.len);
     try testing.expectEqual(@as(usize, 11), @typeInfo(PointerListener).@"struct".fields.len);
+    try testing.expectEqual(@as(usize, 6), @typeInfo(DataDeviceListener).@"struct".fields.len);
+    try testing.expectEqual(@as(usize, 3), @typeInfo(DataOfferListener).@"struct".fields.len);
+    try testing.expectEqual(@as(usize, 6), @typeInfo(DataSourceListener).@"struct".fields.len);
 
     // And every entry is a pointer, so the struct is the flat array C expects.
     inline for (@typeInfo(PointerListener).@"struct".fields) |field| {
         try testing.expectEqual(@sizeOf(usize), @sizeOf(field.type));
     }
+}
+
+test "the clipboard's opcodes name the messages they are used for" {
+    var lib = dyn.Library.openAny(candidates) catch return error.SkipZigTest;
+    defer lib.close();
+    const core = CoreInterfaces.load(&lib) orelse return error.SkipZigTest;
+
+    const Name = struct {
+        fn of(interface: *const WlInterface, opcode: u32) []const u8 {
+            return std.mem.span(interface.methods.?[opcode].name);
+        }
+    };
+    try testing.expectEqualStrings("create_data_source", Name.of(core.wl_data_device_manager_interface, data_device_manager_create_data_source));
+    try testing.expectEqualStrings("get_data_device", Name.of(core.wl_data_device_manager_interface, data_device_manager_get_data_device));
+    try testing.expectEqualStrings("set_selection", Name.of(core.wl_data_device_interface, data_device_set_selection));
+    try testing.expectEqualStrings("release", Name.of(core.wl_data_device_interface, data_device_release));
+    try testing.expectEqualStrings("offer", Name.of(core.wl_data_source_interface, data_source_offer));
+    try testing.expectEqualStrings("destroy", Name.of(core.wl_data_source_interface, data_source_destroy));
+    try testing.expectEqualStrings("receive", Name.of(core.wl_data_offer_interface, data_offer_receive));
+    try testing.expectEqualStrings("destroy", Name.of(core.wl_data_offer_interface, data_offer_destroy));
+
+    try testing.expectEqualStrings("?ou", std.mem.span(core.wl_data_device_interface.methods.?[data_device_set_selection].signature));
+    try testing.expectEqualStrings("sh", std.mem.span(core.wl_data_offer_interface.methods.?[data_offer_receive].signature));
+    try testing.expectEqualStrings("selection", std.mem.span(core.wl_data_device_interface.events.?[5].name));
+    try testing.expectEqualStrings("send", std.mem.span(core.wl_data_source_interface.events.?[1].name));
 }
 
 test "keys are evdev codes with no offset, unlike X11" {

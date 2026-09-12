@@ -80,8 +80,9 @@ pub const SizeLimits = struct {
 /// Every call a windowing system has to answer.
 ///
 /// Anything a backend cannot do returns `error.Unavailable` rather than being
-/// left out: a caller that asks for a clipboard on Android should get an answer
-/// it can act on, not a compile error that moves the problem to build time.
+/// left out: a caller that asks for a window's position on Wayland should get
+/// an answer it can act on, not a compile error that moves the problem to build
+/// time.
 pub const Vtable = struct {
     /// Which one this is. `Context.backend` reads it back out.
     backend: platform.Backend,
@@ -261,6 +262,22 @@ pub const Vtable = struct {
     ///
     /// Owned by the backend and valid until the next `pump`.
     preedit: *const fn (impl: Impl) ?*const text.Preedit,
+
+    /// Put text on the system clipboard. Checked by the context first: it is
+    /// UTF-8, and a backend converts only what its system keeps differently.
+    setClipboardText: *const fn (impl: Impl, text: []const u8) Error!void,
+
+    /// Append the clipboard's text to `out`, as UTF-8 in whatever shape the
+    /// system keeps it, or nothing when it holds no text. Line endings and
+    /// broken bytes are the context's to tidy, once for every backend.
+    clipboardText: *const fn (
+        impl: Impl,
+        out: *std.ArrayListUnmanaged(u8),
+        gpa: Allocator,
+    ) Error!void,
+
+    /// Whether the clipboard holds text, asked without reading it.
+    hasClipboardText: *const fn (impl: Impl) bool,
 
     /// The windowing system's own handle, as a number.
     ///

@@ -49,6 +49,8 @@ const gl = @import("../gl.zig");
 const vulkan = @import("../vulkan.zig");
 const text_mod = @import("../text.zig");
 const android_text = @import("android_text.zig");
+const android_clipboard = @import("android_clipboard.zig");
+const jni = @import("jni.zig");
 const virtual_key = @import("virtual_key.zig");
 const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
@@ -557,6 +559,8 @@ const Impl = struct {
     /// Attached on the first key rather than at startup, so a program that
     /// never reads text never touches JNI.
     text: android_text.Backend = .{},
+    /// The clipboard, over the same attachment. See `android_clipboard`.
+    clipboard: android_clipboard.Backend = .{},
     /// Nothing composes here: a `NativeActivity` has no `InputConnection`, so
     /// a soft keyboard commits whole characters and never reports a
     /// composition. Empty rather than null, because that is the truth.
@@ -606,6 +610,9 @@ pub const vtable: backend.Vtable = .{
     .setTextInput = setTextInput,
     .setTextInputArea = setTextInputArea,
     .preedit = preedit,
+    .setClipboardText = setClipboardText,
+    .clipboardText = clipboardText,
+    .hasClipboardText = hasClipboardText,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -658,6 +665,8 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
 
 fn deinit(impl: backend.Impl, gpa: Allocator) void {
     const self = cast(impl);
+    // Before the text backend, which detaches the thread it needs.
+    if (self.text.env) |env| self.clipboard.close(env);
     self.text.close();
     self.gl.close();
     self.lib.close();
@@ -949,6 +958,39 @@ fn setTextInputArea(impl: backend.Impl, native: backend.NativeWindow, area: text
 
 fn preedit(impl: backend.Impl) ?*const text_mod.Preedit {
     return &cast(impl).preedit;
+}
+
+// -------------------------------------------------------------------------
+// The clipboard
+// -------------------------------------------------------------------------
+
+/// The attached thread, with the clipboard looked up on it. The text backend
+/// attached the thread and owns that; the clipboard only borrows it.
+fn clipboardEnv(self: *Impl) ?jni.JniEnv {
+    if (!ensureText(self)) return null;
+    const env = self.text.env orelse return null;
+    const activity = glue.activity orelse return null;
+    if (!self.clipboard.open(env, activity.clazz)) return null;
+    return env;
+}
+
+fn setClipboardText(impl: backend.Impl, text: []const u8) Error!void {
+    const self = cast(impl);
+    const env = clipboardEnv(self) orelse return error.Unavailable;
+    if (!try self.clipboard.setText(env, self.gpa, text)) return error.Unavailable;
+}
+
+fn clipboardText(impl: backend.Impl, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    const self = cast(impl);
+    const env = clipboardEnv(self) orelse return error.Unavailable;
+    const activity = glue.activity orelse return error.Unavailable;
+    try self.clipboard.readText(env, activity.clazz, gpa, out);
+}
+
+fn hasClipboardText(impl: backend.Impl) bool {
+    const self = cast(impl);
+    const env = clipboardEnv(self) orelse return false;
+    return self.clipboard.hasText(env);
 }
 
 /// Route one event to the gamepad state, or leave it for the window.

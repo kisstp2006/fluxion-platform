@@ -179,6 +179,9 @@ pub const vtable: backend.Vtable = .{
     .setTextInput = setTextInput,
     .setTextInputArea = setTextInputArea,
     .preedit = preedit,
+    .setClipboardText = setClipboardText,
+    .clipboardText = clipboardText,
+    .hasClipboardText = hasClipboardText,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -694,6 +697,37 @@ fn setTextInputArea(impl: backend.Impl, native: backend.NativeWindow, area: text
 
 fn preedit(impl: backend.Impl) ?*const text_mod.Preedit {
     return &cast(impl).preedit;
+}
+
+// -------------------------------------------------------------------------
+// The clipboard
+//
+// A page may write the clipboard when the browser agrees - at once in Chrome,
+// inside a key press or a click elsewhere, which the glue waits for - but may
+// read it only when somebody pastes. So a read answers with the last paste the
+// page heard, or with what the program put there since. That is enough for
+// ctrl+V: the paste arrives in the same pump as the key, and the glue keeps it
+// out of the hidden text field, so the program pastes it as it would anywhere.
+// -------------------------------------------------------------------------
+
+fn setClipboardText(impl: backend.Impl, text: []const u8) Error!void {
+    _ = impl;
+    if (js.setClipboard(text.ptr, @intCast(text.len)) == 0) return error.Unavailable;
+}
+
+fn clipboardText(impl: backend.Impl, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    _ = impl;
+    const known = js.clipboardSize();
+    if (known <= 0) return;
+    const start = out.items.len;
+    const bytes = try out.addManyAsSlice(gpa, @intCast(known));
+    const copied = js.clipboardRead(bytes.ptr, @intCast(bytes.len));
+    out.shrinkRetainingCapacity(start + @min(copied, bytes.len));
+}
+
+fn hasClipboardText(impl: backend.Impl) bool {
+    _ = impl;
+    return js.clipboardSize() > 0;
 }
 
 // -------------------------------------------------------------------------
@@ -1494,6 +1528,48 @@ test "text input is a field the page focuses, and turning it off ends a composit
             try testing.expect(vtable.preedit(impl).?.isEmpty());
         }
     }.run);
+}
+
+test "the clipboard is what the program put there, or what was pasted since" {
+    stub.reset();
+    defer stub.reset();
+    const impl = try open(testing.allocator);
+    defer vtable.deinit(impl, testing.allocator);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+
+    try vtable.clipboardText(impl, &out, testing.allocator);
+    try testing.expectEqualStrings("", out.items);
+    try testing.expect(!vtable.hasClipboardText(impl));
+
+    try vtable.setClipboardText(impl, "copied, ő");
+    try testing.expectEqualStrings("copied, ő", stub.page.clipboard[0..stub.page.clipboard_len.?]);
+    try testing.expect(vtable.hasClipboardText(impl));
+    try vtable.clipboardText(impl, &out, testing.allocator);
+    try testing.expectEqualStrings("copied, ő", out.items);
+
+    stub.paste("pasted\r\nfrom elsewhere");
+    out.clearRetainingCapacity();
+    try vtable.clipboardText(impl, &out, testing.allocator);
+    try testing.expectEqualStrings("pasted\r\nfrom elsewhere", out.items);
+
+    stub.paste("");
+    out.clearRetainingCapacity();
+    try vtable.clipboardText(impl, &out, testing.allocator);
+    try testing.expectEqualStrings("", out.items);
+    try testing.expect(!vtable.hasClipboardText(impl));
+}
+
+test "a page with no way to write the clipboard says so" {
+    stub.reset();
+    defer stub.reset();
+    stub.page.clipboard_api = false;
+    const impl = try open(testing.allocator);
+    defer vtable.deinit(impl, testing.allocator);
+
+    try testing.expectError(error.Unavailable, vtable.setClipboardText(impl, "text"));
+    try testing.expectEqual(@as(?usize, null), stub.page.clipboard_len);
 }
 
 test "the screen is one monitor, measured in the page's own pixels" {

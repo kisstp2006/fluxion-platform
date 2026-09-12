@@ -102,7 +102,7 @@ pub const Error = error{
     /// A window could not be created, though the connection is fine.
     WindowCreationFailed,
     /// Asked for something this backend has not got: a cursor shape, a
-    /// clipboard, a second window on Android.
+    /// window position on Wayland, a second window on Android.
     Unavailable,
     /// Ran out of memory.
     OutOfMemory,

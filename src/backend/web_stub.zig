@@ -99,6 +99,12 @@ pub const Page = struct {
 
     /// The files of the last drop, as the glue would have read them.
     dropped: []const []const u8 = &.{},
+
+    /// The clipboard as the page knows it, null until it knows anything.
+    clipboard: [4096]u8 = undefined,
+    clipboard_len: ?usize = null,
+    /// Whether the page has any way at all to write the clipboard.
+    clipboard_api: bool = true,
 };
 
 pub var page: Page = .{};
@@ -122,6 +128,13 @@ pub fn queue(record: wire.Record, text: []const u8) void {
 
     page.pending[page.pending_count] = copy;
     page.pending_count += 1;
+}
+
+/// Somebody pasted, which is when a page learns what the clipboard holds.
+pub fn paste(text: []const u8) void {
+    std.debug.assert(text.len <= page.clipboard.len);
+    @memcpy(page.clipboard[0..text.len], text);
+    page.clipboard_len = text.len;
 }
 
 /// The canvas behind a handle, which is its slot plus one so that zero can
@@ -388,6 +401,24 @@ pub fn droppedRead(index: u32, ptr: [*]u8, len: u32) u32 {
     const file = page.dropped[index];
     const kept = @min(len, file.len);
     @memcpy(ptr[0..kept], file[0..kept]);
+    return @intCast(kept);
+}
+
+pub fn setClipboard(ptr: [*]const u8, len: u32) u32 {
+    if (!page.clipboard_api) return 0;
+    paste(ptr[0..len]);
+    return 1;
+}
+
+pub fn clipboardSize() i32 {
+    const len = page.clipboard_len orelse return -1;
+    return @intCast(len);
+}
+
+pub fn clipboardRead(ptr: [*]u8, len: u32) u32 {
+    const known = page.clipboard_len orelse return 0;
+    const kept = @min(len, known);
+    @memcpy(ptr[0..kept], page.clipboard[0..kept]);
     return @intCast(kept);
 }
 

@@ -22,123 +22,19 @@
 //! means a Java subclass rather than a few JNI calls. A program that needs it
 //! should host its own `EditText` and feed this library.
 //!
-//! **The JNI function table is indexed by position.** `JNINativeInterface` is a
-//! struct of function pointers whose order is fixed by the specification and has
-//! not changed since 1.6, so the slots below are named where they are used and
-//! padded where they are not. One field out of place calls the wrong function
-//! with the wrong arguments, which is why the count is asserted in a test.
+//! The JNI tables themselves are in `jni`, which the clipboard shares.
 
 const std = @import("std");
 
-/// C's `JavaVM*` and `JNIEnv*`, which are **double** pointers.
-///
-/// In C++ a `JavaVM` is the interface struct itself and a method is called on
-/// it directly. In C it is a struct with one field - a pointer to that
-/// interface - so `JavaVM*` is a pointer to a pointer to the table, and every
-/// call is `(*vm)->Method(vm, ...)`.
-///
-/// `ANativeActivity.vm` is the C spelling. Getting this wrong reads the wrong
-/// words as function pointers and jumps to whatever is there: the first attempt
-/// here died at address 1.
-pub const JavaVm = *const *const JniInvokeInterface;
-pub const JniEnv = *const *const JniNativeInterface;
-const JObject = ?*anyopaque;
-const JClass = JObject;
-const JMethodId = ?*anyopaque;
+const jni = @import("jni.zig");
 
-/// `JNI_VERSION_1_6`, which is what every Android since 2.3 answers to.
-const jni_version_1_6: i32 = 0x00010006;
-const jni_ok: i32 = 0;
-
-/// `JavaVM`'s own table. Three reserved slots come first, which is the
-/// specification's own layout and not padding this file invented.
-const JniInvokeInterface = extern struct {
-    reserved0: ?*anyopaque = null,
-    reserved1: ?*anyopaque = null,
-    reserved2: ?*anyopaque = null,
-
-    DestroyJavaVM: ?*const fn (JavaVm) callconv(.c) i32 = null,
-    AttachCurrentThread: ?*const fn (JavaVm, *JniEnv, ?*anyopaque) callconv(.c) i32 = null,
-    DetachCurrentThread: ?*const fn (JavaVm) callconv(.c) i32 = null,
-    GetEnv: ?*const fn (JavaVm, *?*anyopaque, i32) callconv(.c) i32 = null,
-    AttachCurrentThreadAsDaemon: ?*const fn (JavaVm, *JniEnv, ?*anyopaque) callconv(.c) i32 = null,
-};
-
-/// `JNIEnv`'s table, as far as the calls this file makes.
-///
-/// Four reserved slots, then every function in specification order. Only the
-/// five that are used are named; the rest are pointers with no signature,
-/// which is enough to put the named ones at the right offsets.
-const JniNativeInterface = extern struct {
-    reserved0: ?*anyopaque = null,
-    reserved1: ?*anyopaque = null,
-    reserved2: ?*anyopaque = null,
-    reserved3: ?*anyopaque = null,
-
-    GetVersion: ?*anyopaque = null, // 4
-    DefineClass: ?*anyopaque = null, // 5
-    FindClass: ?*const fn (JniEnv, [*:0]const u8) callconv(.c) JClass = null, // 6
-    FromReflectedMethod: ?*anyopaque = null, // 7
-    FromReflectedField: ?*anyopaque = null, // 8
-    ToReflectedMethod: ?*anyopaque = null, // 9
-    GetSuperclass: ?*anyopaque = null, // 10
-    IsAssignableFrom: ?*anyopaque = null, // 11
-    ToReflectedField: ?*anyopaque = null, // 12
-    Throw: ?*anyopaque = null, // 13
-    ThrowNew: ?*anyopaque = null, // 14
-    ExceptionOccurred: ?*const fn (JniEnv) callconv(.c) JObject = null, // 15
-    ExceptionDescribe: ?*anyopaque = null, // 16
-    ExceptionClear: ?*const fn (JniEnv) callconv(.c) void = null, // 17
-    FatalError: ?*anyopaque = null, // 18
-    PushLocalFrame: ?*anyopaque = null, // 19
-    PopLocalFrame: ?*anyopaque = null, // 20
-    NewGlobalRef: ?*const fn (JniEnv, JObject) callconv(.c) JObject = null, // 21
-    DeleteGlobalRef: ?*const fn (JniEnv, JObject) callconv(.c) void = null, // 22
-    DeleteLocalRef: ?*const fn (JniEnv, JObject) callconv(.c) void = null, // 23
-    IsSameObject: ?*anyopaque = null, // 24
-    NewLocalRef: ?*anyopaque = null, // 25
-    EnsureLocalCapacity: ?*anyopaque = null, // 26
-    AllocObject: ?*anyopaque = null, // 27
-    NewObject: ?*anyopaque = null, // 28
-    NewObjectV: ?*anyopaque = null, // 29
-    NewObjectA: ?*const fn (JniEnv, JClass, JMethodId, ?*const JValue) callconv(.c) JObject = null, // 30
-    GetObjectClass: ?*anyopaque = null, // 31
-    IsInstanceOf: ?*anyopaque = null, // 32
-    GetMethodID: ?*const fn (JniEnv, JClass, [*:0]const u8, [*:0]const u8) callconv(.c) JMethodId = null, // 33
-    CallObjectMethod: ?*anyopaque = null, // 34
-    CallObjectMethodV: ?*anyopaque = null, // 35
-    CallObjectMethodA: ?*anyopaque = null, // 36
-    CallBooleanMethod: ?*anyopaque = null, // 37
-    CallBooleanMethodV: ?*anyopaque = null, // 38
-    CallBooleanMethodA: ?*anyopaque = null, // 39
-    CallByteMethod: ?*anyopaque = null, // 40
-    CallByteMethodV: ?*anyopaque = null, // 41
-    CallByteMethodA: ?*anyopaque = null, // 42
-    CallCharMethod: ?*anyopaque = null, // 43
-    CallCharMethodV: ?*anyopaque = null, // 44
-    CallCharMethodA: ?*anyopaque = null, // 45
-    CallShortMethod: ?*anyopaque = null, // 46
-    CallShortMethodV: ?*anyopaque = null, // 47
-    CallShortMethodA: ?*anyopaque = null, // 48
-    CallIntMethod: ?*anyopaque = null, // 49
-    CallIntMethodV: ?*anyopaque = null, // 50
-    /// The array form, because the variadic ones cannot be called portably
-    /// from Zig - and because an array of `jvalue` is what this needs anyway.
-    CallIntMethodA: ?*const fn (JniEnv, JObject, JMethodId, ?*const JValue) callconv(.c) i32 = null, // 51
-};
-
-/// `jvalue`, the union an array-form call takes its arguments as.
-const JValue = extern union {
-    z: u8,
-    b: i8,
-    c: u16,
-    s: i16,
-    i: i32,
-    j: i64,
-    f: f32,
-    d: f64,
-    l: JObject,
-};
+pub const JavaVm = jni.JavaVm;
+pub const JniEnv = jni.JniEnv;
+const JObject = jni.JObject;
+const JMethodId = jni.JMethodId;
+const JValue = jni.JValue;
+const jni_ok = jni.ok;
+const clearException = jni.clearException;
 
 /// A thread attached to the VM, and the two things looked up on it.
 ///
@@ -259,46 +155,11 @@ pub const Backend = struct {
     }
 };
 
-/// Clear anything the VM threw.
-///
-/// A pending exception makes the *next* JNI call abort the process, so this
-/// runs after every call that can throw - which, in JNI, is most of them.
-fn clearException(env: JniEnv) void {
-    const occurred = env.*.ExceptionOccurred orelse return;
-    const clear = env.*.ExceptionClear orelse return;
-    if (occurred(env) != null) clear(env);
-}
-
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
 
 const testing = std.testing;
-
-test "the JNI slots are where the specification puts them" {
-    // Indexed by position, so a field in the wrong place calls a different
-    // function than the name says. These four offsets are the whole risk.
-    const size = @sizeOf(usize);
-    try testing.expectEqual(6 * size, @offsetOf(JniNativeInterface, "FindClass"));
-    try testing.expectEqual(15 * size, @offsetOf(JniNativeInterface, "ExceptionOccurred"));
-    try testing.expectEqual(17 * size, @offsetOf(JniNativeInterface, "ExceptionClear"));
-    try testing.expectEqual(21 * size, @offsetOf(JniNativeInterface, "NewGlobalRef"));
-    try testing.expectEqual(22 * size, @offsetOf(JniNativeInterface, "DeleteGlobalRef"));
-    try testing.expectEqual(23 * size, @offsetOf(JniNativeInterface, "DeleteLocalRef"));
-    try testing.expectEqual(30 * size, @offsetOf(JniNativeInterface, "NewObjectA"));
-    try testing.expectEqual(33 * size, @offsetOf(JniNativeInterface, "GetMethodID"));
-    try testing.expectEqual(51 * size, @offsetOf(JniNativeInterface, "CallIntMethodA"));
-
-    // And the VM table, where three reserved slots come first.
-    try testing.expectEqual(4 * size, @offsetOf(JniInvokeInterface, "AttachCurrentThread"));
-    try testing.expectEqual(5 * size, @offsetOf(JniInvokeInterface, "DetachCurrentThread"));
-}
-
-test "a jvalue is one machine word, as the array form expects" {
-    // Every argument in an array-form call is this size, so a struct that came
-    // out larger would misalign every argument after the first.
-    try testing.expectEqual(@as(usize, 8), @sizeOf(JValue));
-}
 
 test "a backend that never attached produces nothing rather than crashing" {
     var backend: Backend = .{};

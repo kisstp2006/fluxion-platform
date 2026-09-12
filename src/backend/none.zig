@@ -57,6 +57,9 @@ pub const vtable: backend.Vtable = .{
     .setTextInput = setTextInput,
     .setTextInputArea = setTextInputArea,
     .preedit = preedit,
+    .setClipboardText = setClipboardText,
+    .clipboardText = clipboardText,
+    .hasClipboardText = hasClipboardText,
     .setFullscreen = setFullscreen,
     .setCursorMode = setCursorMode,
     .setRawMouseMotion = setRawMouseMotion,
@@ -165,6 +168,22 @@ fn setTextInputArea(impl: backend.Impl, native: backend.NativeWindow, area: text
 fn preedit(impl: backend.Impl) ?*const text.Preedit {
     _ = impl;
     return null;
+}
+
+/// No session, so no clipboard to share with anything.
+fn setClipboardText(impl: backend.Impl, utf8: []const u8) Error!void {
+    _ = .{ impl, utf8 };
+    return error.Unavailable;
+}
+
+fn clipboardText(impl: backend.Impl, out: *std.ArrayListUnmanaged(u8), gpa: Allocator) Error!void {
+    _ = .{ impl, out, gpa };
+    return error.Unavailable;
+}
+
+fn hasClipboardText(impl: backend.Impl) bool {
+    _ = impl;
+    return false;
 }
 
 /// Nothing to draw into, so nothing to draw with. Every one of these refuses
@@ -319,6 +338,17 @@ test "pumping produces nothing, forever" {
     try vtable.pump(impl, &queue);
     try vtable.pump(impl, &queue);
     try testing.expect(!queue.pending());
+}
+
+test "there is no clipboard, and every call says so" {
+    const impl = try open(testing.allocator);
+    defer vtable.deinit(impl, testing.allocator);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    try testing.expectError(error.Unavailable, vtable.setClipboardText(impl, "text"));
+    try testing.expectError(error.Unavailable, vtable.clipboardText(impl, &out, testing.allocator));
+    try testing.expect(!vtable.hasClipboardText(impl));
 }
 
 test "waiting with no timeout returns rather than hanging" {

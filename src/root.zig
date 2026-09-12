@@ -170,6 +170,7 @@ test {
     _ = @import("gamepad_test.zig");
     _ = @import("gl_test.zig");
     _ = @import("text_test.zig");
+    _ = @import("clipboard_test.zig");
     _ = Context;
     _ = Window;
     _ = @import("backend/none.zig");
@@ -177,6 +178,8 @@ test {
     _ = @import("backend/evdev.zig");
     // Nor has the rule every backend works the virtual key out with.
     _ = @import("backend/virtual_key.zig");
+    // Nor the clipboard's conversions.
+    _ = @import("backend/clipboard.zig");
 
     const os = @import("builtin").os.tag;
     if (os == .windows) {
@@ -190,7 +193,9 @@ test {
     // whichever machine the tests are actually run on.
     _ = @import("backend/android_gamepad.zig");
     // Same again: JNI table offsets are arithmetic, checkable anywhere.
+    _ = @import("backend/jni.zig");
     _ = @import("backend/android_text.zig");
+    _ = @import("backend/android_clipboard.zig");
     // And the web backend in full: off a browser it talks to `web_stub.zig`,
     // a fake page, so the whole path from a record to an event is checked on
     // whatever machine runs the tests.
