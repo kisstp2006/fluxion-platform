@@ -197,7 +197,8 @@ pub const Vtable = struct {
     /// meaningful in `disabled` mode.
     setRawMouseMotion: *const fn (impl: Impl, native: NativeWindow, on: bool) bool,
 
-    /// Put the pointer somewhere, in content-area coordinates.
+    /// Put the pointer somewhere, in content-area coordinates: the framebuffer's
+    /// pixels, which every position a backend reports is in too.
     setCursorPos: *const fn (impl: Impl, native: NativeWindow, x: f64, y: f64) Error!void,
 
     /// Use one of the system's own cursor shapes.
@@ -301,7 +302,7 @@ pub const Vtable = struct {
     setTextInput: *const fn (impl: Impl, native: NativeWindow, on: bool) Error!void,
 
     /// Where the caret is, so an input method can put its candidates near it
-    /// and not on top of it. In the window's own coordinates.
+    /// and not on top of it. In the framebuffer's pixels.
     setTextInputArea: *const fn (impl: Impl, native: NativeWindow, area: text.Area) Error!void,
 
     /// What is being composed right now, or null where nothing is.

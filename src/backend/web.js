@@ -1487,11 +1487,22 @@ export class Platform {
     if (this.dialog && !this.dialog.shown) this.showDialog(this.dialog);
   }
 
+  /// Where an event is on the canvas, in its drawing buffer's pixels: the unit
+  /// every backend gives a position in.
   local(win, event) {
     const rect = win.canvas.getBoundingClientRect();
+    const [perX, perY] = this.pixelsPerCss(win);
     return [
-      event.clientX - rect.left - win.canvas.clientLeft,
-      event.clientY - rect.top - win.canvas.clientTop,
+      (event.clientX - rect.left - win.canvas.clientLeft) * perX,
+      (event.clientY - rect.top - win.canvas.clientTop) * perY,
+    ];
+  }
+
+  pixelsPerCss(win) {
+    const fallback = win.scale || 1;
+    return [
+      win.cssWidth > 0 ? win.fbWidth / win.cssWidth : fallback,
+      win.cssHeight > 0 ? win.fbHeight / win.cssHeight : fallback,
     ];
   }
 
@@ -1848,11 +1859,13 @@ export class Platform {
     if (!field) return;
     const rect = win.canvas.getBoundingClientRect();
     const area = win.area ?? { x: 0, y: 0, width: 1, height: 16 };
+    // The area is in the drawing buffer's pixels, and a style in CSS pixels.
+    const [perX, perY] = this.pixelsPerCss(win);
     Object.assign(field.style, {
-      left: `${rect.left + area.x}px`,
-      top: `${rect.top + area.y}px`,
-      width: `${Math.max(1, area.width)}px`,
-      height: `${Math.max(1, area.height)}px`,
+      left: `${rect.left + win.canvas.clientLeft + area.x / perX}px`,
+      top: `${rect.top + win.canvas.clientTop + area.y / perY}px`,
+      width: `${Math.max(1, area.width / perX)}px`,
+      height: `${Math.max(1, area.height / perY)}px`,
     });
   }
 

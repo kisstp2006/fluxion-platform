@@ -1916,6 +1916,7 @@ fn onPointerMotion(data: ?*anyopaque, proxy: *Proxy, time: u32, x: Fixed, y: Fix
     // movement; taking this as well would turn a camera at double speed.
     if (native.mode == .disabled) return;
 
+    // Surface coordinates are the framebuffer's pixels while buffers are drawn at scale 1.
     const px = fixedToDouble(x);
     const py = fixedToDouble(y);
     const dx = if (native.has_position) px - native.last_x else 0;

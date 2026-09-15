@@ -103,8 +103,8 @@ pub fn truncateUtf8(value: []const u8, limit: usize) []const u8 {
     return value[0..end];
 }
 
-/// Where an input method should put its candidate window, in the window's own
-/// coordinates.
+/// Where an input method should put its candidate window, in content-area
+/// coordinates: the framebuffer's pixels, as a `CursorEvent`'s.
 ///
 /// The caret, and how tall the line is. An input method puts its list of
 /// candidates just below this and takes care not to cover it - which it can

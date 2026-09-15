@@ -99,6 +99,12 @@ pub const MouseButtonEvent = struct {
 
 /// The cursor moved, in content-area coordinates with the origin top left.
 ///
+/// **Content-area coordinates are the framebuffer's pixels, on every
+/// backend**: the pixels a program draws, so a position lands on what was
+/// drawn there. A layout written in `Window.size` units divides by the ratio
+/// of `framebufferSize` to `size`. A browser's CSS pixels and a Wayland
+/// surface's are turned into these by the backend.
+///
 /// `dx` and `dy` are the movement since the last such event. In `.disabled`
 /// cursor mode they are the raw motion the device reported and `x`/`y` stop
 /// meaning anything, which is what a camera wants.

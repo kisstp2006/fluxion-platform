@@ -248,9 +248,9 @@ pub fn textInput(self: Window) bool {
 /// Where the caret is, so an input method's candidate list appears next to the
 /// text rather than across it.
 ///
-/// In the window's own coordinates: the caret's position and how tall the line
-/// is. Worth setting whenever the caret moves, and refused by a backend that
-/// has nowhere to put it.
+/// In content-area coordinates, the framebuffer's pixels: the caret's position
+/// and how tall the line is. Worth setting whenever the caret moves, and
+/// refused by a backend that has nowhere to put it.
 pub fn setTextInputArea(self: Window, area: text.Area) Error!void {
     const e = self.ctx.entry(self.id) orelse return error.Unavailable;
     try self.ctx.vtable.setTextInputArea(self.ctx.impl, e.native, area);
@@ -448,7 +448,7 @@ pub fn rawMouseMotion(self: Window) bool {
     return e.raw_motion;
 }
 
-/// Put the pointer somewhere in the content area.
+/// Put the pointer somewhere in the content area, in the framebuffer's pixels.
 ///
 /// Rarely what a program wants: warping the cursor under the user's hand is
 /// jarring, and in `.disabled` mode it does nothing useful because there is no

@@ -223,6 +223,14 @@ losing focus lets go of every held key - otherwise alt-tab leaves a camera
 drifting forever - and `setStickyKeys` keeps a press readable until it has
 been polled once, so a tap that begins and ends inside one frame is not lost.
 
+**A position is in the framebuffer's pixels, on every backend**: a
+`.cursor`, a button's `x` and `y`, a drop's, `setCursorPos` and
+`setTextInputArea`. They are the pixels a program draws, so a click lands on
+what was drawn under it without converting anything - where Windows and X11
+already count, and where a browser's CSS pixels and a Wayland surface's are
+turned by the backend. `win.size()` is the one answer in logical units, for a
+layout written in them: divide a position by `framebufferSize` over `size`.
+
 **A wheel turns in notches, and a text view scrolls by the user's setting.**
 `.scroll` counts notches, which is what a zoom wants; `ctx.scrollLines()` is
 how many lines - and characters, sideways - the user has the system scroll
