@@ -172,3 +172,6 @@ pub extern "fluxion_platform" fn chosenSize(index: u32) i32;
 
 /// Copy that file into `ptr[0..len]`. Answers how many bytes were copied.
 pub extern "fluxion_platform" fn chosenRead(index: u32, ptr: [*]u8, len: u32) u32;
+
+/// `window.open` in a new tab. Zero when the browser blocked it.
+pub extern "fluxion_platform" fn openUrl(ptr: [*]const u8, len: u32) u32;

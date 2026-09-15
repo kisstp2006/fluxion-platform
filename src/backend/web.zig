@@ -198,6 +198,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
     .clearContext = clearContext,
@@ -562,6 +563,12 @@ fn enumerateMonitors(
     var info: wire.MonitorInfo = .{};
     if (js.monitor(&info) == 0) return;
     try list.append(gpa, monitorFrom(info));
+}
+
+/// A page knows one screen, the one it is on.
+fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
+    _ = .{ impl, native };
+    return if (list.len == 0) null else 0;
 }
 
 /// A `MonitorInfo` as a `Monitor`.
@@ -1009,6 +1016,11 @@ fn resized(self: *Impl, id: event.WindowId, record: *const wire.Record) void {
         push(self, .{ .scale = .{ .window = id, .x = scale, .y = scale } });
         changed = true;
     }
+    // A collapsed canvas keeps its last size, as a minimised window does.
+    if (width == 0 or height == 0 or fb_width == 0 or fb_height == 0) {
+        if (changed) push(self, .{ .refresh = id });
+        return;
+    }
     if (width != native.width or height != native.height) {
         native.width = width;
         native.height = height;
@@ -1053,11 +1065,11 @@ fn pushChosen(self: *Impl) void {
 // -------------------------------------------------------------------------
 
 /// The glue's modifier bits, which are `keys.Mods` bit for bit: shift,
-/// control, alt, meta, caps lock, num lock. Anything above is dropped rather
-/// than landing in the padding.
+/// control, alt, meta, caps lock, num lock, AltGr. Anything above is dropped
+/// rather than landing in the padding.
 pub fn modsFrom(bits: i32) keys.Mods {
     const byte: u8 = @truncate(@as(u32, @bitCast(bits)));
-    return @bitCast(byte & 0b0011_1111);
+    return @bitCast(byte & 0b0111_1111);
 }
 
 /// 0 release, 1 press, 2 repeat - the order of `keys.Action`, and the glue
@@ -1381,6 +1393,21 @@ test "a resize is the scale, the size, the pixels and a refresh, in that order" 
             stub.queue(.{ .kind = .resize, .window = 1, .a = 640, .b = 480, .c = 960, .d = 720, .x = 1.5 }, "");
             try vtable.pump(impl, queue);
             try testing.expectEqual(@as(?event.Event, null), queue.next());
+        }
+    }.run);
+}
+
+test "a canvas the page collapses keeps its last size, and no resize to nothing is sent" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            stub.queue(.{ .kind = .resize, .window = 1, .a = 800, .b = 600, .c = 800, .d = 600, .x = 1 }, "");
+            try vtable.pump(impl, queue);
+            queue.clear();
+
+            stub.queue(.{ .kind = .resize, .window = 1, .a = 0, .b = 0, .c = 0, .d = 0, .x = 1 }, "");
+            try vtable.pump(impl, queue);
+            try testing.expectEqual(@as(?event.Event, null), queue.next());
+            try testing.expectEqual([2]u32{ 800, 600 }, vtable.framebufferSize(impl, native));
         }
     }.run);
 }
@@ -1860,7 +1887,8 @@ test "the numbers the glue reads are the enums' own" {
     try testing.expectEqual(keys.Mods{ .super = true }, modsFrom(8));
     try testing.expectEqual(keys.Mods{ .caps_lock = true }, modsFrom(16));
     try testing.expectEqual(keys.Mods{ .num_lock = true }, modsFrom(32));
-    try testing.expectEqual(keys.Mods.none, modsFrom(64 | 128));
+    try testing.expectEqual(keys.Mods{ .alt_graph = true }, modsFrom(64));
+    try testing.expectEqual(keys.Mods.none, modsFrom(128));
 }
 
 test "the DOM counts its buttons in a different order" {

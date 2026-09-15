@@ -80,6 +80,16 @@ pub const Rect = struct {
             px < self.x + @as(i32, @intCast(self.width)) and
             py < self.y + @as(i32, @intCast(self.height));
     }
+
+    /// How many pixels two rectangles share.
+    pub fn overlap(self: Rect, other: Rect) u64 {
+        const left = @max(self.x, other.x);
+        const top = @max(self.y, other.y);
+        const right = @min(@as(i64, self.x) + self.width, @as(i64, other.x) + other.width);
+        const bottom = @min(@as(i64, self.y) + self.height, @as(i64, other.y) + other.height);
+        if (right <= left or bottom <= top) return 0;
+        return @intCast((right - left) * (bottom - top));
+    }
 };
 
 /// The longest monitor name this library keeps. Held inline rather than
@@ -236,6 +246,17 @@ test "a rectangle knows what is inside it" {
     // both claim the same pixel.
     try testing.expect(!area.contains(300, 150));
     try testing.expect(!area.contains(99, 50));
+}
+
+test "two rectangles share the pixels both cover, and neighbours share none" {
+    const left: Rect = .{ .x = 0, .y = 0, .width = 1920, .height = 1080 };
+    const right: Rect = .{ .x = 1920, .y = 0, .width = 1280, .height = 1024 };
+    const window: Rect = .{ .x = 1820, .y = 100, .width = 400, .height = 300 };
+
+    try testing.expectEqual(@as(u64, 0), left.overlap(right));
+    try testing.expectEqual(@as(u64, 100 * 300), left.overlap(window));
+    try testing.expectEqual(@as(u64, 300 * 300), right.overlap(window));
+    try testing.expectEqual(@as(u64, 400 * 300), window.overlap(window));
 }
 
 test "fullscreen says which monitor it means" {

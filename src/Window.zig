@@ -18,7 +18,7 @@ const testing = std.testing;
 
 const backend = @import("backend.zig");
 const cursor = @import("cursor.zig");
-const monitor = @import("monitor.zig");
+const monitor_mod = @import("monitor.zig");
 const gl = @import("gl.zig");
 const vulkan = @import("vulkan.zig");
 const text = @import("text.zig");
@@ -39,7 +39,7 @@ pub const Entry = struct {
     /// backend can be asked, and the answer is the program's own request.
     cursor_mode: cursor.Mode = .normal,
     raw_motion: bool = false,
-    fullscreen: monitor.Fullscreen = .windowed,
+    fullscreen: monitor_mod.Fullscreen = .windowed,
     text_input: bool = false,
 };
 
@@ -167,7 +167,7 @@ pub fn maximize(self: Window) Error!void {
     return self.setState(.maximized);
 }
 
-/// Undo either of those.
+/// Undo either of those, in one step: neither minimised nor maximised after it.
 pub fn restore(self: Window) Error!void {
     return self.setState(.restored);
 }
@@ -381,10 +381,10 @@ pub fn createVulkanSurface(
 /// different resolution genuinely is the point.
 ///
 /// The index is into `Context.monitors`.
-pub fn setFullscreen(self: Window, wanted: monitor.Fullscreen) Error!void {
+pub fn setFullscreen(self: Window, wanted: monitor_mod.Fullscreen) Error!void {
     const e = self.ctx.entry(self.id) orelse return error.Unavailable;
 
-    const target: ?*const monitor.Monitor = if (wanted.monitorIndex()) |index| blk: {
+    const target: ?*const monitor_mod.Monitor = if (wanted.monitorIndex()) |index| blk: {
         const list = self.ctx.monitors();
         if (index >= list.len) return error.Unavailable;
         break :blk &list[index];
@@ -395,9 +395,22 @@ pub fn setFullscreen(self: Window, wanted: monitor.Fullscreen) Error!void {
 }
 
 /// What it is now.
-pub fn fullscreen(self: Window) monitor.Fullscreen {
+pub fn fullscreen(self: Window) monitor_mod.Fullscreen {
     const e = self.ctx.entry(self.id) orelse return .windowed;
     return e.fullscreen;
+}
+
+/// The index into `Context.monitors` of the monitor the window is on; the
+/// primary one where the system cannot tell, and null only with no monitors.
+pub fn monitor(self: Window) ?usize {
+    const e = self.ctx.entry(self.id) orelse return null;
+    const list = self.ctx.monitors();
+    if (list.len == 0) return null;
+    if (self.ctx.vtable.windowMonitor(self.ctx.impl, e.native, list)) |index| return index;
+    for (list, 0..) |mon, index| {
+        if (mon.primary) return index;
+    }
+    return 0;
 }
 
 /// Hide the pointer, confine it, or take it out of the picture entirely.
@@ -496,6 +509,7 @@ test "a stale handle answers rather than crashing" {
     try testing.expectEqual([2]u32{ 0, 0 }, stale.size());
     try testing.expectEqual([2]u32{ 0, 0 }, stale.framebufferSize());
     try testing.expectEqual([2]f32{ 1, 1 }, stale.contentScale());
+    try testing.expectEqual(@as(?usize, null), stale.monitor());
     try testing.expectError(error.Unavailable, stale.setTitle("nothing"));
 
     // And the ones that return nothing simply do nothing.

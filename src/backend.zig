@@ -60,7 +60,8 @@ pub const WindowState = enum {
     iconified,
     /// Filling the work area, but still a window.
     maximized,
-    /// Neither of those - the size it had before.
+    /// Neither of those - the size it had before. Reached in one go, even from
+    /// minimised-from-maximised.
     restored,
     /// Raised and given the keyboard. Rude, and refused by most systems unless
     /// the program already had focus.
@@ -90,6 +91,21 @@ pub const SizeLimits = struct {
     min_height: u32 = 0,
     max_width: u32 = 0,
     max_height: u32 = 0,
+
+    /// A minimum above the maximum loses to it.
+    pub fn clamp(self: SizeLimits, wanted: [2]u32) [2]u32 {
+        return .{
+            within(wanted[0], self.min_width, self.max_width),
+            within(wanted[1], self.min_height, self.max_height),
+        };
+    }
+
+    fn within(value: u32, min: u32, max: u32) u32 {
+        var held = value;
+        if (min != 0) held = @max(held, min);
+        if (max != 0) held = @min(held, max);
+        return held;
+    }
 };
 
 /// Every call a windowing system has to answer.
@@ -115,6 +131,7 @@ pub const Vtable = struct {
         desc: WindowDesc,
     ) Error!NativeWindow,
 
+    /// Puts back what the window changed for the whole machine: a display mode, a held pointer.
     destroyWindow: *const fn (impl: Impl, gpa: Allocator, native: NativeWindow) void,
 
     /// Drain whatever the system has and push it into `queue`.
@@ -143,6 +160,7 @@ pub const Vtable = struct {
     size: *const fn (impl: Impl, native: NativeWindow) [2]u32,
     /// The drawable, in pixels. The same on an ordinary display and larger on a
     /// HiDPI one, which is why a swapchain must ask for this and not `size`.
+    /// Both keep the last real size while minimised; no resize to 0x0 is pushed.
     framebufferSize: *const fn (impl: Impl, native: NativeWindow) [2]u32,
     /// Pixels per logical unit, per axis.
     contentScale: *const fn (impl: Impl, native: NativeWindow) [2]f32,
@@ -162,14 +180,16 @@ pub const Vtable = struct {
     /// Is it in that state now?
     getState: *const fn (impl: Impl, native: NativeWindow, which: WindowState) bool,
 
-    /// The bounds the user may resize within.
+    /// The bounds the user may resize within, applied at once unless the
+    /// window is maximised, minimised or fullscreen.
     setSizeLimits: *const fn (impl: Impl, native: NativeWindow, limits: SizeLimits) Error!void,
 
     /// How see-through the whole window is, from 0 to 1. `error.Unavailable`
     /// where the system has no such idea.
     setOpacity: *const fn (impl: Impl, native: NativeWindow, opacity: f32) Error!void,
 
-    /// Hide, confine or free the pointer. See `cursor.Mode`.
+    /// Hide, confine or free the pointer. See `cursor.Mode`. A confining mode
+    /// holds the pointer only while the window has focus.
     setCursorMode: *const fn (impl: Impl, native: NativeWindow, mode: cursor.Mode) Error!void,
 
     /// Ask for unaccelerated motion, and say whether it was granted. Only
@@ -195,6 +215,13 @@ pub const Vtable = struct {
         modes: *std.ArrayListUnmanaged(monitor.VideoMode),
         gpa: Allocator,
     ) Error!void,
+
+    /// The index into `list` of the monitor the window is on, or null if unknown.
+    windowMonitor: *const fn (
+        impl: Impl,
+        native: NativeWindow,
+        list: []const monitor.Monitor,
+    ) ?usize,
 
     /// Fill a monitor, or go back to being a window.
     setFullscreen: *const fn (
@@ -364,11 +391,59 @@ pub const Queue = struct {
     }
 };
 
+/// Events a backend made outside a pump, kept for the next one: Windows answers
+/// a program's own `maximize` at once, and a Wayland roundtrip runs listeners.
+/// Not a drop or a dialog's answer, whose paths would not live that long.
+pub const Later = struct {
+    items: std.ArrayListUnmanaged(event.Event) = .empty,
+
+    pub const max = 256;
+
+    pub fn keep(self: *Later, gpa: Allocator, ev: event.Event) void {
+        switch (ev) {
+            .drop, .file_dialog => return,
+            else => {},
+        }
+        if (self.items.items.len >= max) return;
+        self.items.append(gpa, ev) catch {};
+    }
+
+    pub fn hand(self: *Later, queue: *Queue) Allocator.Error!void {
+        defer self.items.clearRetainingCapacity();
+        for (self.items.items) |ev| try queue.push(ev);
+    }
+
+    pub fn deinit(self: *Later, gpa: Allocator) void {
+        self.items.deinit(gpa);
+    }
+};
+
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "what happened between pumps waits for the next one, paths aside" {
+    var later: Later = .{};
+    defer later.deinit(testing.allocator);
+    var queue: Queue = .init(testing.allocator);
+    defer queue.deinit();
+    const id: event.WindowId = @enumFromInt(1);
+
+    later.keep(testing.allocator, .{ .maximize = .{ .window = id, .value = true } });
+    later.keep(testing.allocator, .{ .drop = .{ .window = id, .paths = &.{"gone.png"} } });
+    later.keep(testing.allocator, .{ .iconify = .{ .window = id, .value = true } });
+    try later.hand(&queue);
+
+    try testing.expect(queue.next().? == .maximize);
+    try testing.expect(queue.next().? == .iconify);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
+    try testing.expectEqual(@as(usize, 0), later.items.items.len);
+
+    for (0..Later.max + 10) |_| later.keep(testing.allocator, .{ .close = id });
+    try testing.expectEqual(@as(usize, Later.max), later.items.items.len);
+}
 
 test "a queue hands events back in the order they arrived" {
     var queue: Queue = .init(testing.allocator);
@@ -402,6 +477,17 @@ test "clearing keeps the memory and forgets the events" {
     try testing.expectEqual(@as(usize, 0), queue.read);
     // The point of `clear` over `deinit`: the next pump does not allocate again.
     try testing.expectEqual(capacity, queue.items.capacity);
+}
+
+test "a size is brought inside its limits, and zero is no limit" {
+    const limits: SizeLimits = .{ .min_width = 200, .min_height = 150, .max_width = 800 };
+    try testing.expectEqual([2]u32{ 200, 150 }, limits.clamp(.{ 100, 100 }));
+    try testing.expectEqual([2]u32{ 800, 5000 }, limits.clamp(.{ 1000, 5000 }));
+    try testing.expectEqual([2]u32{ 640, 480 }, limits.clamp(.{ 640, 480 }));
+    try testing.expectEqual([2]u32{ 1, 1 }, (SizeLimits{}).clamp(.{ 1, 1 }));
+
+    const contradicting: SizeLimits = .{ .min_width = 900, .max_width = 600 };
+    try testing.expectEqual(@as(u32, 600), contradicting.clamp(.{ 100, 100 })[0]);
 }
 
 test "a half-read queue keeps the rest" {

@@ -18,6 +18,9 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `text` | The text a keyboard actually produces, and the input method between the two. |
 | `dialog` | Asking the user for files or a folder, in the system's own dialog. |
 | `trash` | A file or a folder moved to the system's trash, where the user can take it back from. No window needed. |
+| `folders` | Home, documents, and where a program keeps its settings, its data and its cache - the system's own answer. |
+| `fonts` | The font the system draws its own interface in, as a file a font library can open. |
+| `shell` | A file, a folder or an address handed to the system: opened, or shown in the file manager. |
 | `web` | What a browser build needs and `std` cannot give it: a console, a panic that says what it was, and the bytes of a dropped file. |
 | `backend` | What a windowing system has to answer to — the seam a new backend is written against. |
 
@@ -144,6 +147,36 @@ while (ctx.poll()) |ev| switch (ev) // read what it said
 for a program that redraws only when something changed, and `post` wakes it
 from another thread — the one call on a context that may be made from anywhere.
 
+A program's own calls are heard the same way: `maximize()` comes back as
+`.maximize` at the next pump on every backend, though Windows answers it
+before the call has even returned.
+
+## A minimised window keeps its size
+
+```zig
+.iconify => |s| paused = s.value,     // a swapchain waits; it is not resized
+.maximize => |s| layout.maximized = s.value,
+```
+
+**No backend reports a window of nought by nought.** Minimising is an
+`.iconify` event and nothing else, and `framebufferSize` keeps answering the
+last real size until the window comes back - a swapchain cannot be 0x0, and a
+program that resized to one crashed on the way back. Coming back says so:
+`.iconify` false, and `.maximize` false when a maximised window is restored.
+
+**`restore()` reaches the state it reports**, neither minimised nor
+maximised, in one step - Windows alone would bring a window minimised from
+maximised back maximised. **`setSizeLimits` applies at once**, to a window
+already outside the limits as well as to the next drag, except while the
+window is maximised, minimised or fullscreen, when it meets them on becoming a
+window again.
+
+**`win.monitor()` is the monitor the window is on**, as an index into
+`ctx.monitors()`: the one Windows says, the one a Wayland surface last
+entered, the one showing most of an X11 window - and the primary one where the
+system cannot tell. What `setFullscreen(.{ .borderless = win.monitor().? })`
+wants.
+
 ## The cursor is what makes a camera possible
 
 Four modes, and the difference between two of them is the difference between
@@ -164,6 +197,13 @@ of screen and the camera stops with it.
 Acceleration is a curve meant to help a cursor land on a button and is exactly
 wrong for aiming - but not every system will turn it off, and a program that
 is told no can turn down its own sensitivity instead of pretending.
+
+**A mode that holds the pointer holds it only while the window has focus.**
+Alt-tab lets it go and coming back takes it again, on every backend, and a
+mode asked for in the background waits for the window to come forward - so a
+game never traps the pointer of someone using another program. Closing the
+window lets go too, and puts back a display mode an exclusive fullscreen
+changed: both belong to the whole machine, and would outlive the program.
 
 What a session can actually do differs by compositor, not by platform. `zig
 build example` asks and prints the answers.
@@ -207,6 +247,13 @@ and a character called `'`.
 **Text input is off until asked for.** That is what raises the soft keyboard
 on a phone and what lets an input method open a candidate window; a game that
 never calls it never gets one mid-firefight.
+
+**AltGr is its own modifier, `mods.alt_graph`.** Windows - and every browser
+on it - reports the right alt of a European layout as control and alt held
+together, so a program that treated control as a shortcut ate every `@` a
+Hungarian typed, and one that refused control-with-alt lost real shortcuts.
+Here `control` means a control key on every backend, and the left control
+Windows invents for AltGr is not reported as a key at all.
 
 **A composition is a state, not an event.** While an input method is being
 used there is text on screen that has not been committed and may still change.
@@ -308,6 +355,8 @@ so there the answer names them - a folder answers with every file inside it,
 named by its path in the folder - and `ctx.chosenFile` has the bytes. It works
 on the desktop too, reading the path, so the loop above is the same everywhere.
 
+A folder to start in may be written with either slash, on Windows as well.
+
 **One at a time.** Asking while a dialog is open is `error.Unavailable`, and
 so is a filter that some system would read differently: an extension is
 `"png"` or `".png"`, never `"*.png"` or `"png;jpg"`, and `"*"` lets any file
@@ -368,6 +417,42 @@ drive is `error.OtherDrive`, since moving it there would be copying it.
 `trash.freedesktop.move` does the same into any folder, which is what a test
 uses. Anywhere else it is `error.Unsupported`, and `trash.available` says so
 before anything is tried.
+
+## The system's folders, its font, and handing things over
+
+```zig
+const settings = try platform.folders.path(gpa, io, .config);   // %APPDATA%, ~/.config
+const face = try platform.fonts.systemUi(gpa, io);              // Segoe UI, what fontconfig picks
+try platform.shell.showInFolder(gpa, io, "C:/game/art/hero.png");
+try platform.shell.openUrl(gpa, io, "https://ziglang.org/");
+```
+
+Three things a program otherwise finds out from environment variables and a
+list of guesses, and gets wrong on somebody's machine. None needs a window.
+
+**`folders.path` is the system's answer**: `home`, `documents`, and `config`,
+`data` and `cache` for what a program keeps. Documents moved to OneDrive, and
+a Linux desktop's in its own language - `~/Dokumentumok` - are where they
+really are. A folder that is not there is not made.
+
+**`fonts.systemUi` is the font the system's own dialogs use**, as a path and,
+for a collection, which face in it: the message font Windows is set to, found
+in the registry's list of installed fonts; what fontconfig makes of
+`sans-serif`; Roboto on a phone. A face inside a collection comes back as
+the file and its index - Microsoft YaHei UI is the second face of `msyh.ttc`.
+
+**`shell` says what went wrong**, where starting `explorer` or `xdg-open` and
+hoping says nothing: `error.FileNotFound`, `error.NoHandler` when nothing opens
+that kind of thing, `error.Refused`. `shell.support` says which of the three
+calls a build has.
+
+| | `folders` | `fonts.systemUi` | `shell` |
+| --- | --- | --- | --- |
+| Windows | `SHGetKnownFolderPath`: the roaming profile for config and data, the local one for the cache | `SPI_GETNONCLIENTMETRICS`, then the registry's font list | `ShellExecuteW`; `SHOpenFolderAndSelectItems`, with the file selected |
+| Linux, BSD | the XDG base directories, and `user-dirs.dirs` for documents | fontconfig, loaded when asked; a list of the usual files without it | the portal's `OpenURI` for an address and the file manager's `ShowItems` over D-Bus, then `xdg-open`, whose exit code is read |
+| macOS | `~/Library/Application Support` and `Caches` | San Francisco, then Helvetica | `open`, and `open -R` to show |
+| Android | the app's own storage; documents are the part a file manager sees | Roboto | `openUrl` only, as an `ACTION_VIEW` intent - which also opens the `content://` a file dialog answers with |
+| web | `error.Unsupported` | `error.Unsupported` | `openUrl` only, in a new tab; `error.Refused` when the popup blocker says no |
 
 ## Drawing: a context, or a surface, and nothing after that
 
@@ -759,6 +844,13 @@ portal and to zenity and kdialog is bytes and strings, checked on every host
 down to the D-Bus alignment, and so are the JNI slots and the methods the Java
 and the Zig halves of `FluxionActivity` expect of each other. O and D in
 `example-window` and `example-web` open the real ones.
+
+`shell` is tested the same way: nothing is opened, only a path that is not
+there is refused before anything starts, and what goes over D-Bus and what
+`xdg-open`'s exit code means are checked as bytes. What a window does when
+focus moves, when it is minimised and when AltGr goes down is driven with the
+messages the system would send - posted to a hidden window on Windows, sent
+through the server on X11 - so the pointer is held for no longer than a test.
 
 The web backend runs its tests on every host, against a page that is not
 there: `web_stub.zig` answers every import the browser would, and a test

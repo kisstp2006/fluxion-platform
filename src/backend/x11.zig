@@ -375,7 +375,15 @@ const window_event_mask: c_long = key_press_mask | key_release_mask |
     button_press_mask | button_release_mask |
     enter_window_mask | leave_window_mask |
     pointer_motion_mask | exposure_mask |
-    structure_notify_mask | focus_change_mask;
+    structure_notify_mask | focus_change_mask | property_change_mask;
+
+/// `XFocusChangeEvent.mode`: a keyboard grab starting or ending, not focus moving.
+const notify_grab: c_int = 1;
+const notify_ungrab: c_int = 2;
+
+/// `WM_STATE`'s first value.
+const normal_state: c_long = 1;
+const iconic_state: c_long = 3;
 
 // Modifier bits in `state`.
 const shift_mask: c_uint = 1 << 0;
@@ -384,6 +392,7 @@ const control_mask: c_uint = 1 << 2;
 const mod1_mask: c_uint = 1 << 3; // alt
 const mod2_mask: c_uint = 1 << 4; // num lock
 const mod4_mask: c_uint = 1 << 6; // super
+const mod5_mask: c_uint = 1 << 7; // ISO_Level3_Shift, AltGr, in every xkeyboard-config layout
 
 // `XSizeHints.flags`.
 const p_min_size: c_long = 1 << 4;
@@ -819,6 +828,7 @@ const Impl = struct {
     cardinal: Atom,
     net_wm_state_fullscreen: Atom,
     net_workarea: Atom,
+    wm_state: Atom,
     scale: f32,
     /// Null where RandR is missing, and then there is one monitor the size of
     /// the screen. Which is not a lie: without RandR that is all there is.
@@ -891,10 +901,14 @@ const Native = struct {
     last_x: f64 = 0,
     last_y: f64 = 0,
     has_position: bool = false,
-    /// Tracked from `_NET_WM_STATE`, because asking the server every frame is a
-    /// round trip and the window manager tells us anyway.
+    /// Tracked from `WM_STATE` and `_NET_WM_STATE`, because asking the server
+    /// every frame is a round trip and the window manager tells us anyway.
     iconified: bool = false,
     maximized: bool = false,
+    focused: bool = false,
+    held: bool = false,
+    /// Focus came back while another client held the pointer; `pump` tries again.
+    regrab: bool = false,
 
     /// What the window was before it filled a monitor, so that leaving puts it
     /// back rather than in the corner at the monitor's size.
@@ -947,6 +961,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
     .clearContext = clearContext,
@@ -1016,6 +1031,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .cardinal = x.XInternAtom(display, "CARDINAL", 0),
         .net_wm_state_fullscreen = x.XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", 0),
         .net_workarea = x.XInternAtom(display, "_NET_WORKAREA", 0),
+        .wm_state = x.XInternAtom(display, "WM_STATE", 0),
         .scale = readScale(x, display),
         .answers = .init(gpa),
     };
@@ -1251,7 +1267,8 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
 
     // A grab outlives the window it was taken for, and a client that leaves one
     // behind freezes every other program's pointer.
-    if (win.mode.confines()) _ = self.x.XUngrabPointer(self.display, 0);
+    letGo(self, win);
+    restoreCrtc(self, win);
     if (win.shape != 0) _ = self.x.XFreeCursor(self.display, win.shape);
     if (win.blank != 0) _ = self.x.XFreeCursor(self.display, win.blank);
 
@@ -1359,14 +1376,19 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
     if (win.shape != 0) _ = self.x.XFreeCursor(self.display, win.shape);
     win.shape = made;
 
-    if (!win.mode.hides()) {
+    if (!pointerHidden(win)) {
         _ = self.x.XDefineCursor(self.display, win.window, made);
         _ = self.x.XFlush(self.display);
     }
 }
 
+/// A disabled window in the background has let go, and shows the pointer.
+fn pointerHidden(win: *const Native) bool {
+    return win.mode == .hidden or (win.mode == .disabled and win.held);
+}
+
 fn applyCursor(self: *Impl, win: *Native) void {
-    if (win.mode.hides()) {
+    if (pointerHidden(win)) {
         if (win.blank == 0) win.blank = blankCursor(self, win.window);
         if (win.blank != 0) _ = self.x.XDefineCursor(self.display, win.window, win.blank);
     } else if (win.shape != 0) {
@@ -1397,46 +1419,65 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
     const win = castWindow(native);
     if (win.mode == mode) return;
 
-    const was_confined = win.mode.confines();
+    letGo(self, win);
     win.mode = mode;
+    win.regrab = false;
+    // From the background it waits for `FocusIn`.
+    if (mode.confines() and hasFocus(self, win) and !hold(self, win)) {
+        // Another client already holds the pointer - a menu, a drag. Not
+        // this program's fault, and not something to pretend worked.
+        win.mode = .normal;
+        applyCursor(self, win);
+        return error.Unavailable;
+    }
+    applyCursor(self, win);
+}
 
-    if (mode == .disabled) {
-        // Remember where it was, in window coordinates, so leaving can put it
-        // back rather than stranding it in the middle.
+fn hasFocus(self: *Impl, win: *const Native) bool {
+    var focused: Window = 0;
+    var revert: c_int = 0;
+    _ = self.x.XGetInputFocus(self.display, &focused, &revert);
+    return focused == win.window;
+}
+
+/// A grab would outlive alt-tab, so a confining mode grabs only while the
+/// window has focus, as GLFW does. False when another client holds the pointer.
+fn hold(self: *Impl, win: *Native) bool {
+    if (win.held or !win.mode.confines()) return true;
+    if (win.mode == .disabled) {
         win.saved_x = @intFromFloat(win.last_x);
         win.saved_y = @intFromFloat(win.last_y);
+        if (win.blank == 0) win.blank = blankCursor(self, win.window);
     }
-
+    // A grab is the only way X11 confines a pointer: there is no clip
+    // rectangle, so the window takes every pointer event and the pointer
+    // stops being able to reach anything else.
+    const result = self.x.XGrabPointer(
+        self.display,
+        win.window,
+        0,
+        pointer_grab_mask,
+        grab_mode_async,
+        grab_mode_async,
+        win.window,
+        if (win.mode.hides()) win.blank else 0,
+        0,
+    );
+    if (result != grab_success) return false;
+    win.held = true;
+    if (win.mode == .disabled) warpToCentre(self, win);
     applyCursor(self, win);
+    return true;
+}
 
-    if (mode.confines()) {
-        // A grab is the only way X11 confines a pointer: there is no clip
-        // rectangle, so the window takes every pointer event and the pointer
-        // stops being able to reach anything else.
-        const result = self.x.XGrabPointer(
-            self.display,
-            win.window,
-            0,
-            pointer_grab_mask,
-            grab_mode_async,
-            grab_mode_async,
-            win.window,
-            if (mode.hides()) win.blank else 0,
-            0,
-        );
-        if (result != grab_success) {
-            // Another client already holds the pointer - a menu, a drag. Not
-            // this program's fault, and not something to pretend worked.
-            win.mode = .normal;
-            applyCursor(self, win);
-            return error.Unavailable;
-        }
-        if (mode == .disabled) warpToCentre(self, win);
-    } else if (was_confined) {
-        _ = self.x.XUngrabPointer(self.display, 0);
+fn letGo(self: *Impl, win: *Native) void {
+    if (!win.held) return;
+    win.held = false;
+    _ = self.x.XUngrabPointer(self.display, 0);
+    if (win.mode == .disabled) {
         _ = self.x.XWarpPointer(self.display, 0, win.window, 0, 0, 0, 0, win.saved_x, win.saved_y);
-        _ = self.x.XFlush(self.display);
     }
+    applyCursor(self, win);
 }
 
 /// X11 has no unaccelerated motion without XInput2, which this backend does not
@@ -1716,6 +1757,23 @@ fn intersect(a: monitor.Rect, b: monitor.Rect) monitor.Rect {
         .width = @intCast(right - left),
         .height = @intCast(bottom - top),
     };
+}
+
+/// X11 has no call for it, so it is the monitor showing most of the window.
+fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
+    const win = castWindow(native);
+    const at = position(impl, native);
+    const area: monitor.Rect = .{ .x = at[0], .y = at[1], .width = @max(1, win.width), .height = @max(1, win.height) };
+    var best: ?usize = null;
+    var most: u64 = 0;
+    for (list, 0..) |mon, index| {
+        const shared = mon.bounds.overlap(area);
+        if (shared > most) {
+            most = shared;
+            best = index;
+        }
+    }
+    return best;
 }
 
 fn pollGamepads(impl: backend.Impl, devices: *[gamepad.max_devices]gamepad.Device) void {
@@ -2088,6 +2146,12 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
     }
     self.x.XSetWMNormalHints(self.display, win.window, &hints);
     _ = self.x.XFlush(self.display);
+
+    // A window manager may apply new hints only to the next drag.
+    if (win.maximized or win.iconified or win.is_fullscreen) return;
+    const now: [2]u32 = .{ win.width, win.height };
+    const inside = limits.clamp(now);
+    if (!std.meta.eql(inside, now)) try setSize(impl, native, inside[0], inside[1]);
 }
 
 /// `_NET_WM_WINDOW_OPACITY`, which a compositor reads and acts on.
@@ -2184,6 +2248,53 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
 
         try translate(self, &ev, queue);
     }
+
+    for (self.windows.values()) |win| {
+        if (win.regrab and win.focused and hold(self, win)) win.regrab = false;
+    }
+}
+
+/// Up to `into.len` values of a format-32 property. Xlib hands those back as
+/// `long`s, eight bytes each on a 64-bit machine.
+fn readLongs(self: *Impl, window: Window, property: Atom, kind: Atom, into: []c_long) []c_long {
+    var actual_type: Atom = 0;
+    var actual_format: c_int = 0;
+    var count: c_ulong = 0;
+    var remaining: c_ulong = 0;
+    var data: ?[*]u8 = null;
+    const status = self.x.XGetWindowProperty(
+        self.display,
+        window,
+        property,
+        0,
+        @intCast(into.len),
+        0,
+        kind,
+        &actual_type,
+        &actual_format,
+        &count,
+        &remaining,
+        &data,
+    );
+    if (status != 0) return into[0..0];
+    const bytes = data orelse return into[0..0];
+    defer _ = self.x.XFree(bytes);
+    if (actual_type != kind or actual_format != 32) return into[0..0];
+
+    const values: [*]const c_long = @ptrCast(@alignCast(bytes));
+    const len = @min(count, into.len);
+    @memcpy(into[0..len], values[0..len]);
+    return into[0..len];
+}
+
+/// Either axis counts, as it does for GLFW: a window manager may maximise one.
+fn isMaximized(self: *Impl, window: Window) bool {
+    var states: [32]c_long = undefined;
+    for (readLongs(self, window, self.net_wm_state, xa_atom, &states)) |value| {
+        const state: Atom = @bitCast(value);
+        if (state == self.net_wm_state_maximized_vert or state == self.net_wm_state_maximized_horz) return true;
+    }
+    return false;
 }
 
 fn wait(impl: backend.Impl, timeout_ms: ?u32) Error!void {
@@ -2272,8 +2383,32 @@ fn translate(self: *Impl, ev: *XEvent, queue: *backend.Queue) Error!void {
             } });
         },
 
-        focus_in => try queue.push(.{ .focus = .{ .window = id, .value = true } }),
-        focus_out => try queue.push(.{ .focus = .{ .window = id, .value = false } }),
+        focus_in, focus_out => {
+            // An alt-tab switcher grabbing the keyboard is not focus moving.
+            if (ev.xfocus.mode == notify_grab or ev.xfocus.mode == notify_ungrab) return;
+            const gained = ev.type == focus_in;
+            native.focused = gained;
+            native.regrab = gained and !hold(self, native);
+            if (!gained) letGo(self, native);
+            try queue.push(.{ .focus = .{ .window = id, .value = gained } });
+        },
+
+        property_notify => {
+            if (ev.xproperty.atom == self.wm_state) {
+                var state: [1]c_long = undefined;
+                const got = readLongs(self, native.window, self.wm_state, self.wm_state, &state);
+                if (got.len == 0 or (got[0] != iconic_state and got[0] != normal_state)) return;
+                const iconified = got[0] == iconic_state;
+                if (iconified == native.iconified) return;
+                native.iconified = iconified;
+                try queue.push(.{ .iconify = .{ .window = id, .value = iconified } });
+            } else if (ev.xproperty.atom == self.net_wm_state) {
+                const maximized = isMaximized(self, native.window);
+                if (maximized == native.maximized) return;
+                native.maximized = maximized;
+                try queue.push(.{ .maximize = .{ .window = id, .value = maximized } });
+            }
+        },
 
         enter_notify => try queue.push(.{ .cursor_enter = .{ .window = id, .value = true } }),
         leave_notify => try queue.push(.{ .cursor_enter = .{ .window = id, .value = false } }),
@@ -2345,6 +2480,8 @@ fn translate(self: *Impl, ev: *XEvent, queue: *backend.Queue) Error!void {
             }
 
             if (native.mode == .disabled) {
+                // Let go in the background: the pointer passing over is not the camera's.
+                if (!native.held) return;
                 // The delta is measured from the middle, and the pointer is put
                 // back there - which is what stops it reaching an edge and the
                 // camera stopping with it.
@@ -2551,6 +2688,7 @@ fn modsFromState(state: c_uint) keys.Mods {
         .super = state & mod4_mask != 0,
         .caps_lock = state & lock_mask != 0,
         .num_lock = state & mod2_mask != 0,
+        .alt_graph = state & mod5_mask != 0,
     };
 }
 
@@ -3030,6 +3168,7 @@ test "modifier state maps onto the same bits everywhere" {
     try testing.expectEqual(keys.Mods{ .super = true }, modsFromState(mod4_mask));
     try testing.expectEqual(keys.Mods{ .caps_lock = true }, modsFromState(lock_mask));
     try testing.expectEqual(keys.Mods{ .num_lock = true }, modsFromState(mod2_mask));
+    try testing.expectEqual(keys.Mods{ .alt_graph = true }, modsFromState(mod5_mask));
 
     try testing.expectEqual(keys.Mods.none, modsFromState(0));
     try testing.expectEqual(
@@ -3110,6 +3249,7 @@ test "a key sent to the window comes back out as text" {
         };
         if (saw_key and saw_char != null) break;
         _ = self.x.XFlush(self.display);
+        try vtable.wait(impl, 50);
     }
 
     try testing.expect(saw_key);
@@ -3182,6 +3322,94 @@ test "a client message sent to the window comes back out as an event" {
     const first = queue.next() orelse return error.NoEventArrived;
     try testing.expectEqual(id, first.window());
     try testing.expect(first == .close);
+}
+
+fn hiddenTestWindow(impl: backend.Impl, id: event.WindowId) !*Native {
+    return castWindow(try vtable.createWindow(impl, testing.allocator, id, .{
+        .title = "fluxion-platform state test",
+        .width = 320,
+        .height = 240,
+        .resizable = true,
+        .decorated = true,
+        .visible = false,
+        .maximized = false,
+        .gl = null,
+    }));
+}
+
+fn nextOf(impl: backend.Impl, queue: *backend.Queue, tag: std.meta.Tag(event.Event)) !event.Event {
+    for (0..100) |_| {
+        while (queue.next()) |ev| {
+            if (ev == tag) return ev;
+        }
+        queue.clear();
+        try vtable.pump(impl, queue);
+        if (!queue.pending()) try vtable.wait(impl, 20);
+    }
+    return error.NoEventArrived;
+}
+
+fn setLongs(self: *Impl, window: Window, property: Atom, kind: Atom, values: []const c_long) void {
+    _ = self.x.XChangeProperty(self.display, window, property, kind, 32, prop_mode_replace, @ptrCast(values.ptr), @intCast(values.len));
+    _ = self.x.XFlush(self.display);
+}
+
+test "the window manager minimising and maximising the window comes out as events" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    const id: event.WindowId = @enumFromInt(6);
+    const win = try hiddenTestWindow(impl, id);
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+
+    setLongs(self, win.window, self.wm_state, self.wm_state, &.{ iconic_state, 0 });
+    try testing.expectEqual(event.Event{ .iconify = .{ .window = id, .value = true } }, try nextOf(impl, &queue, .iconify));
+    try testing.expect(vtable.getState(impl, win, .iconified));
+
+    setLongs(self, win.window, self.wm_state, self.wm_state, &.{ normal_state, 0 });
+    try testing.expectEqual(event.Event{ .iconify = .{ .window = id, .value = false } }, try nextOf(impl, &queue, .iconify));
+
+    const both: [2]c_long = .{ @bitCast(self.net_wm_state_maximized_vert), @bitCast(self.net_wm_state_maximized_horz) };
+    setLongs(self, win.window, self.net_wm_state, xa_atom, &both);
+    try testing.expectEqual(event.Event{ .maximize = .{ .window = id, .value = true } }, try nextOf(impl, &queue, .maximize));
+    try testing.expect(vtable.getState(impl, win, .maximized));
+
+    setLongs(self, win.window, self.net_wm_state, xa_atom, &.{});
+    try testing.expectEqual(event.Event{ .maximize = .{ .window = id, .value = false } }, try nextOf(impl, &queue, .maximize));
+    try testing.expect(vtable.getState(impl, win, .restored));
+}
+
+fn sendFocus(self: *Impl, window: Window, kind: c_int, mode: c_int) void {
+    var message: XEvent = std.mem.zeroes(XEvent);
+    message.xfocus = .{ .type = kind, .serial = 0, .send_event = 1, .display = self.display, .window = window, .mode = mode, .detail = 0 };
+    _ = self.x.XSendEvent(self.display, window, 0, 0, &message);
+    _ = self.x.XFlush(self.display);
+}
+
+test "a keyboard grab is not focus, and focus decides whether the pointer is held" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    const id: event.WindowId = @enumFromInt(7);
+    const win = try hiddenTestWindow(impl, id);
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+
+    try vtable.setCursorMode(impl, win, .captured);
+    try testing.expect(!win.held);
+
+    sendFocus(self, win.window, focus_out, notify_grab);
+    sendFocus(self, win.window, focus_in, 0);
+    try testing.expectEqual(event.Event{ .focus = .{ .window = id, .value = true } }, try nextOf(impl, &queue, .focus));
+    try testing.expect(win.focused and !win.held and win.regrab);
+
+    sendFocus(self, win.window, focus_out, 0);
+    try testing.expectEqual(event.Event{ .focus = .{ .window = id, .value = false } }, try nextOf(impl, &queue, .focus));
+    try testing.expect(!win.focused and !win.regrab);
+    try testing.expectEqual(cursor_mod.Mode.captured, win.mode);
 }
 
 test "the wake pipe stops a wait that has nothing to wait for" {

@@ -212,6 +212,21 @@ const gwl_exstyle: i32 = -20;
 const sw_minimize: i32 = 6;
 const sw_restore: i32 = 9;
 const sw_maximize: i32 = 3;
+const sw_shownormal: u32 = 1;
+
+const WindowPlacement = extern struct {
+    length: u32 = @sizeOf(WindowPlacement),
+    flags: u32 = 0,
+    show_cmd: u32 = 0,
+    min_position: Point = .{},
+    max_position: Point = .{},
+    normal_position: Rect = .{},
+};
+
+/// Set on a window minimised from maximised: un-minimising maximises it again.
+const wpf_restoretomaximized: u32 = 0x0002;
+/// Answers for a minimised window too, from where it will come back.
+const monitor_defaulttonearest: u32 = 0x00000002;
 
 const swp_nosize: u32 = 0x0001;
 const swp_nomove: u32 = 0x0002;
@@ -269,6 +284,8 @@ const idc_no: *const anyopaque = @ptrFromInt(32648);
 const idc_hand: *const anyopaque = @ptrFromInt(32649);
 
 const wm_setcursor: u32 = 0x0020;
+const wm_mouseactivate: u32 = 0x0021;
+const wm_capturechanged: u32 = 0x0215;
 const wm_input: u32 = 0x00FF;
 const htclient: isize = 1;
 
@@ -359,12 +376,17 @@ const cfs_exclude: u32 = 0x0080;
 /// `IACE_DEFAULT`, which gives a window the system's own input context back.
 const iace_default: u32 = 0x0010;
 
+const size_restored: WPARAM = 0;
 const size_minimized: WPARAM = 1;
 const size_maximized: WPARAM = 2;
 
 const vk_shift: i32 = 0x10;
 const vk_control: i32 = 0x11;
 const vk_menu: i32 = 0x12;
+const vk_lcontrol: i32 = 0xA2;
+const vk_rcontrol: i32 = 0xA3;
+const vk_lmenu: i32 = 0xA4;
+const vk_rmenu: i32 = 0xA5;
 const vk_lwin: i32 = 0x5B;
 const vk_rwin: i32 = 0x5C;
 const vk_capital: i32 = 0x14;
@@ -416,6 +438,7 @@ const User32 = struct {
     /// odd addresses and a `u16` pointer may not be.
     LoadCursorW: *const fn (?HINSTANCE, ?*const anyopaque) callconv(.winapi) ?HCURSOR,
     GetKeyState: *const fn (i32) callconv(.winapi) i16,
+    GetMessageTime: *const fn () callconv(.winapi) i32,
     /// A virtual key into a scan code, for a keystroke that arrived without
     /// one. See `scancodeFrom`.
     MapVirtualKeyW: *const fn (u32, u32) callconv(.winapi) u32,
@@ -462,6 +485,9 @@ const User32 = struct {
     SetWindowPos: *const fn (HWND, ?HWND, i32, i32, i32, i32, u32) callconv(.winapi) i32,
     IsIconic: *const fn (HWND) callconv(.winapi) i32,
     IsZoomed: *const fn (HWND) callconv(.winapi) i32,
+    GetWindowPlacement: *const fn (HWND, *WindowPlacement) callconv(.winapi) i32,
+    SetWindowPlacement: *const fn (HWND, *const WindowPlacement) callconv(.winapi) i32,
+    MonitorFromWindow: *const fn (HWND, u32) callconv(.winapi) ?*anyopaque,
     GetForegroundWindow: *const fn () callconv(.winapi) ?HWND,
     SetForegroundWindow: *const fn (HWND) callconv(.winapi) i32,
     FlashWindow: *const fn (HWND, i32) callconv(.winapi) i32,
@@ -598,11 +624,15 @@ const Impl = struct {
     /// Where a window procedure puts what it produced. Set for the length of
     /// one `pump` and null the rest of the time, because a message that arrives
     /// outside a pump - Windows sends a few during `CreateWindowExW` - has
-    /// nowhere to go and is dropped rather than written through a stale pointer.
+    /// nowhere to go and is kept in `later` rather than written through a
+    /// stale pointer.
     queue: ?*backend.Queue = null,
+    later: backend.Later = .{},
     /// Set when pushing an event ran out of memory. Reported by `pump`, because
     /// a window procedure has no way to fail.
     push_failed: bool = false,
+    /// AltGr is down: the left control Windows made up for it was taken out.
+    alt_graph: bool = false,
     /// What owns the text this program puts on the clipboard. Made on the first
     /// copy; see `clipboardOwner`.
     clipboard_owner: ?HWND = null,
@@ -630,6 +660,17 @@ const Native = struct {
     /// Applied in `WM_GETMINMAXINFO`, which is the only place Windows asks.
     limits: backend.SizeLimits = .{},
     style: u32 = 0,
+
+    iconified: bool = false,
+    maximized: bool = false,
+    /// The last real content area: Windows reports a minimised window as 0x0.
+    fb_width: u32 = 0,
+    fb_height: u32 = 0,
+
+    focused: bool = false,
+    held: bool = false,
+    /// Activated by a click on the frame: holding the pointer now would stop the drag.
+    frame_click: bool = false,
 
     mode: cursor_mod.Mode = .normal,
     raw_motion: bool = false,
@@ -679,6 +720,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
     .clearContext = clearContext,
@@ -814,6 +856,7 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     if (self.gdi32) |*lib| lib.close();
     if (self.shcore) |*lib| lib.close();
     if (self.shell32) |*lib| lib.close();
+    self.later.deinit(self.gpa);
     self.user32.close();
     self.kernel32.close();
     gpa.destroy(self);
@@ -1339,6 +1382,10 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
         if (job.owner == @as(?*anyopaque, @ptrCast(win.hwnd))) closeDialog(self, job);
     }
 
+    // Both belong to the whole machine and would outlive the window.
+    letGo(self, win);
+    restoreDisplayMode(self, win);
+
     // Before the window: a context outliving its device context is a handle
     // into a window that no longer exists.
     if (win.context) |context| wgl.destroyContext(&self.gl, context);
@@ -1384,11 +1431,26 @@ fn size(impl: backend.Impl, native: backend.NativeWindow) [2]u32 {
 fn framebufferSize(impl: backend.Impl, native: backend.NativeWindow) [2]u32 {
     const self = cast(impl);
     const win = castWindow(native);
+    if (self.u.IsIconic(win.hwnd) != 0) return restoredSize(self, win);
     var rect: Rect = .{};
     if (self.u.GetClientRect(win.hwnd, &rect) == 0) return .{ 0, 0 };
     return .{
         @intCast(@max(0, rect.right - rect.left)),
         @intCast(@max(0, rect.bottom - rect.top)),
+    };
+}
+
+/// Falls back to the placement for a window minimised before it was ever sized.
+fn restoredSize(self: *Impl, win: *Native) [2]u32 {
+    if (win.fb_width != 0 and win.fb_height != 0) return .{ win.fb_width, win.fb_height };
+    var placement: WindowPlacement = .{};
+    if (self.u.GetWindowPlacement(win.hwnd, &placement) == 0) return .{ 0, 0 };
+    var frame: Rect = .{};
+    _ = self.u.AdjustWindowRectEx(&frame, win.style, 0, 0);
+    const area = placement.normal_position;
+    return .{
+        @intCast(@max(0, (area.right - area.left) - (frame.right - frame.left))),
+        @intCast(@max(0, (area.bottom - area.top) - (frame.bottom - frame.top))),
     };
 }
 
@@ -1420,7 +1482,17 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
     win.shape = wanted;
     // Applied now only if the pointer is over the window; `WM_SETCURSOR` puts
     // it back every time after that.
-    if (!win.mode.hides()) _ = self.u.SetCursor(wanted);
+    if (!pointerHidden(win)) _ = self.u.SetCursor(wanted);
+}
+
+/// A disabled window in the background has let go, and shows the pointer.
+fn pointerHidden(win: *const Native) bool {
+    return win.mode == .hidden or (win.mode == .disabled and win.held);
+}
+
+/// Null is how Windows hides the pointer.
+fn pointerShape(self: *Impl, win: *const Native) ?HCURSOR {
+    return if (pointerHidden(win)) null else (win.shape orelse cursorFor(self, .arrow));
 }
 
 /// Hold the pointer inside the content area, or let it go.
@@ -1461,12 +1533,20 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
     const win = castWindow(native);
     if (win.mode == mode) return;
 
-    const was_disabled = win.mode == .disabled;
+    letGo(self, win);
     win.mode = mode;
+    // From the background it waits for `WM_SETFOCUS`.
+    if (win.focused and !win.frame_click) hold(self, win);
+    _ = self.u.SetCursor(pointerShape(self, win));
+}
 
-    if (mode == .disabled) {
-        // Remember where the pointer was, so leaving this mode can put it back
-        // instead of stranding it wherever the camera happened to end.
+/// Windows would leave an alt-tabbed game holding the pointer, so a confining
+/// mode holds it only while the window has the keyboard, as GLFW does.
+fn hold(self: *Impl, win: *Native) void {
+    if (win.held or !win.mode.confines()) return;
+    win.held = true;
+
+    if (win.mode == .disabled) {
         var at: Point = .{};
         if (self.u.GetCursorPos(&at) != 0) {
             win.saved_x = at.x;
@@ -1474,17 +1554,27 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
         }
         win.has_raw_last = false;
         if (win.raw_motion) _ = registerRawMouse(self, win, true);
-    } else if (was_disabled) {
+        // Centred first, or the first delta is the distance to the middle.
+        var rect: Rect = .{};
+        if (self.u.GetClientRect(win.hwnd, &rect) != 0) {
+            var middle: Point = .{ .x = @divTrunc(rect.right, 2), .y = @divTrunc(rect.bottom, 2) };
+            if (self.u.ClientToScreen(win.hwnd, &middle) != 0) _ = self.u.SetCursorPos(middle.x, middle.y);
+        }
+    }
+    clipToWindow(self, win, true);
+    _ = self.u.SetCursor(pointerShape(self, win));
+}
+
+/// Undo `hold`, if it was done.
+fn letGo(self: *Impl, win: *Native) void {
+    if (!win.held) return;
+    win.held = false;
+    clipToWindow(self, win, false);
+    if (win.mode == .disabled) {
         if (win.raw_motion) _ = registerRawMouse(self, win, false);
         _ = self.u.SetCursorPos(win.saved_x, win.saved_y);
     }
-
-    clipToWindow(self, win, mode.confines());
-
-    // A null cursor is how Windows hides one. Setting it here covers the case
-    // where the pointer is already over the window and no `WM_SETCURSOR` is
-    // coming.
-    _ = self.u.SetCursor(if (mode.hides()) null else (win.shape orelse cursorFor(self, .arrow)));
+    _ = self.u.SetCursor(pointerShape(self, win));
 }
 
 fn setRawMouseMotion(impl: backend.Impl, native: backend.NativeWindow, on: bool) bool {
@@ -1494,7 +1584,7 @@ fn setRawMouseMotion(impl: backend.Impl, native: backend.NativeWindow, on: bool)
 
     // Only registered while the pointer is actually disabled; asking for it in
     // any other mode would deliver two sets of movement for one hand.
-    if (win.mode == .disabled) {
+    if (win.mode == .disabled and win.held) {
         if (!registerRawMouse(self, win, on)) return false;
     }
     win.raw_motion = on;
@@ -1580,7 +1670,16 @@ fn setState(impl: backend.Impl, native: backend.NativeWindow, wanted: backend.Wi
     switch (wanted) {
         .iconified => _ = self.u.ShowWindow(win.hwnd, sw_minimize),
         .maximized => _ = self.u.ShowWindow(win.hwnd, sw_maximize),
-        .restored => _ = self.u.ShowWindow(win.hwnd, sw_restore),
+        .restored => {
+            // `SW_RESTORE` alone brings a window minimised from maximised back maximised.
+            var placement: WindowPlacement = .{};
+            if (self.u.GetWindowPlacement(win.hwnd, &placement) != 0) {
+                placement.flags &= ~wpf_restoretomaximized;
+                placement.show_cmd = sw_shownormal;
+                if (self.u.SetWindowPlacement(win.hwnd, &placement) != 0) return;
+            }
+            _ = self.u.ShowWindow(win.hwnd, sw_restore);
+        },
         .focused => {
             _ = self.u.ShowWindow(win.hwnd, sw_show);
             // Refused by Windows unless this process already had focus, and
@@ -1608,11 +1707,30 @@ fn getState(impl: backend.Impl, native: backend.NativeWindow, which: backend.Win
     };
 }
 
-/// Remembered rather than applied: Windows asks for the limits when the user
-/// starts dragging, through `WM_GETMINMAXINFO`, and there is nothing to set.
+/// `WM_GETMINMAXINFO` applies them only to the next drag, so the window is
+/// brought inside them here.
 fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backend.SizeLimits) Error!void {
-    _ = impl;
-    castWindow(native).limits = limits;
+    const self = cast(impl);
+    const win = castWindow(native);
+    win.limits = limits;
+
+    if (win.is_fullscreen or self.u.IsIconic(win.hwnd) != 0 or self.u.IsZoomed(win.hwnd) != 0) return;
+    const now = framebufferSize(impl, native);
+    const inside = limits.clamp(now);
+    if (!std.meta.eql(inside, now)) try setSize(impl, native, inside[0], inside[1]);
+}
+
+/// Matched by corner, because a mode change leaves the list's sizes stale.
+fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
+    const self = cast(impl);
+    const win = castWindow(native);
+    const hmonitor = self.u.MonitorFromWindow(win.hwnd, monitor_defaulttonearest) orelse return null;
+    var info: MonitorInfoExW = .{};
+    if (self.u.GetMonitorInfoW(hmonitor, &info) == 0) return null;
+    for (list, 0..) |mon, index| {
+        if (mon.bounds.x == info.monitor.left and mon.bounds.y == info.monitor.top) return index;
+    }
+    return null;
 }
 
 fn setOpacity(impl: backend.Impl, native: backend.NativeWindow, opacity: f32) Error!void {
@@ -1943,6 +2061,9 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
 
     // The last answer's paths were promised until now.
     _ = self.answers.reset(.retain_capacity);
+    self.later.hand(queue) catch {
+        self.push_failed = true;
+    };
 
     var msg: Msg = .{};
     while (self.u.PeekMessageW(&msg, null, 0, 0, pm_remove) != 0) {
@@ -2056,6 +2177,23 @@ fn handle(
         wm_size => {
             const width: u32 = @intCast(lparam & 0xFFFF);
             const height: u32 = @intCast((lparam >> 16) & 0xFFFF);
+            const iconified = wparam == size_minimized;
+            // `SIZE_MAXSHOW` and `SIZE_MAXHIDE` are about other windows.
+            const maximized = wparam == size_maximized or (native.maximized and wparam != size_restored);
+
+            if (iconified != native.iconified) {
+                native.iconified = iconified;
+                push(self, .{ .iconify = .{ .window = id, .value = iconified } });
+            }
+            if (maximized != native.maximized) {
+                native.maximized = maximized;
+                push(self, .{ .maximize = .{ .window = id, .value = maximized } });
+            }
+            if (native.held) clipToWindow(self, native, true);
+
+            if (iconified or (width == native.fb_width and height == native.fb_height)) return 0;
+            native.fb_width = width;
+            native.fb_height = height;
             // The client rect is in pixels, so this is the framebuffer size;
             // the logical one is that divided by the scale.
             push(self, .{ .framebuffer_resize = .{ .window = id, .width = width, .height = height } });
@@ -2066,16 +2204,11 @@ fn handle(
                 .width = @intFromFloat(@round(@as(f32, @floatFromInt(width)) / scale[0])),
                 .height = @intFromFloat(@round(@as(f32, @floatFromInt(height)) / scale[1])),
             } });
-
-            if (wparam == size_minimized) {
-                push(self, .{ .iconify = .{ .window = id, .value = true } });
-            } else if (wparam == size_maximized) {
-                push(self, .{ .maximize = .{ .window = id, .value = true } });
-            }
             return 0;
         },
 
         wm_move => {
+            if (native.held) clipToWindow(self, native, true);
             push(self, .{ .move = .{
                 .window = id,
                 .x = @as(i16, @truncate(lparam & 0xFFFF)),
@@ -2097,16 +2230,40 @@ fn handle(
         },
 
         wm_setfocus => {
+            native.focused = true;
+            if (!native.frame_click) hold(self, native);
             push(self, .{ .focus = .{ .window = id, .value = true } });
             return 0;
         },
         wm_killfocus => {
+            native.focused = false;
+            native.frame_click = false;
+            self.alt_graph = false;
+            letGo(self, native);
             push(self, .{ .focus = .{ .window = id, .value = false } });
             return 0;
         },
 
+        wm_mouseactivate => {
+            // A click on the frame keeps its capture until the title bar drag is over.
+            const clicked = (lparam >> 16) & 0xFFFF == @as(isize, wm_lbuttondown);
+            if (clicked and lparam & 0xFFFF != htclient) native.frame_click = true;
+            return null;
+        },
+        wm_capturechanged => {
+            if (lparam == 0 and native.frame_click) {
+                native.frame_click = false;
+                if (native.focused) hold(self, native);
+            }
+            return null;
+        },
+
         wm_keydown, wm_syskeydown, wm_keyup, wm_syskeyup => {
             const down = message == wm_keydown or message == wm_syskeydown;
+            if (wparam == @as(WPARAM, @intCast(vk_control)) and (lparam >> 24) & 1 == 0 and rightAltNext(self)) {
+                self.alt_graph = down;
+                return null;
+            }
             // Bit 30 of lParam is the previous state: set means the key was
             // already down, which is what makes this a repeat and not a press.
             const was_down = (lparam >> 30) & 1 != 0;
@@ -2173,17 +2330,14 @@ fn handle(
             // Only for the content area: the frame's own cursors - the resize
             // arrows on the border - belong to Windows.
             if (lparam & 0xFFFF != htclient) return null;
-            _ = self.u.SetCursor(if (native.mode.hides())
-                null
-            else
-                (native.shape orelse cursorFor(self, .arrow)));
+            _ = self.u.SetCursor(pointerShape(self, native));
             return 1;
         },
 
         wm_input => {
             // Only in `disabled`: in every other mode `WM_MOUSEMOVE` is the
             // right source, and taking both would double every movement.
-            if (native.mode != .disabled or !native.raw_motion) return null;
+            if (native.mode != .disabled or !native.raw_motion or !native.held) return null;
 
             var raw: RawInput = undefined;
             var raw_size: u32 = @sizeOf(RawInput);
@@ -2233,6 +2387,8 @@ fn handle(
             const y: f64 = @floatFromInt(@as(i16, @truncate((lparam >> 16) & 0xFFFF)));
 
             if (native.mode == .disabled) {
+                // Let go in the background: the pointer passing over is not the camera's.
+                if (!native.held) return 0;
                 // Raw input is already reporting this hand movement; taking it
                 // twice would turn every camera at double speed.
                 if (native.raw_motion) return 0;
@@ -2401,14 +2557,12 @@ fn dropFiles(self: *Impl, id: event.WindowId, drop: ?*anyopaque) void {
 /// Push, or remember that there was no room. A window procedure cannot fail, so
 /// the failure is carried to the end of `pump` and returned from there.
 fn push(self: *Impl, ev: event.Event) void {
-    const queue = self.queue orelse return;
+    const queue = self.queue orelse return self.later.keep(self.gpa, ev);
     queue.push(ev) catch {
         self.push_failed = true;
     };
 }
 
-/// Combine UTF-16 into a codepoint, or null while a surrogate pair is still
-/// half finished.
 /// Where on the keyboard a key message came from.
 ///
 /// Normally straight out of `lParam`, where bits 16 to 23 hold the scan code
@@ -2502,14 +2656,31 @@ fn readMods(self: *Impl) keys.Mods {
         }
     }.f;
 
+    // The made-up left control stays down in the key state for as long as AltGr is.
+    const alt_graph = self.alt_graph and down(get(vk_rmenu));
     return .{
         .shift = down(get(vk_shift)),
-        .control = down(get(vk_control)),
-        .alt = down(get(vk_menu)),
+        .control = down(get(vk_rcontrol)) or (down(get(vk_lcontrol)) and !alt_graph),
+        .alt = down(get(vk_lmenu)) or (down(get(vk_rmenu)) and !alt_graph),
         .super = down(get(vk_lwin)) or down(get(vk_rwin)),
         .caps_lock = toggled(get(vk_capital)),
         .num_lock = toggled(get(vk_numlock)),
+        .alt_graph = alt_graph,
     };
+}
+
+/// AltGr arrives as a left control Windows made up, then the right alt,
+/// stamped with the same time. GLFW spots it the same way.
+fn rightAltNext(self: *Impl) bool {
+    var next: Msg = .{};
+    if (self.u.PeekMessageW(&next, null, 0, 0, pm_noremove) == 0) return false;
+    const key = switch (next.message) {
+        wm_keydown, wm_syskeydown, wm_keyup, wm_syskeyup => true,
+        else => false,
+    };
+    const extended = (next.lparam >> 24) & 1 != 0;
+    return key and extended and next.wparam == @as(WPARAM, @intCast(vk_menu)) and
+        next.time == @as(u32, @bitCast(self.u.GetMessageTime()));
 }
 
 // -------------------------------------------------------------------------
@@ -2968,4 +3139,128 @@ test "a dialog's answer comes out of a pump, naming its window and its id" {
     try testing.expectEqual(request.window, got.window);
     try testing.expectEqual(@as(usize, 0), got.paths.len);
     try testing.expectEqual(@as(?*win32_dialog.Dialog, null), self.dialog);
+}
+
+fn hiddenWindow(impl: backend.Impl, id: event.WindowId) !*Native {
+    return castWindow(try vtable.createWindow(impl, testing.allocator, id, .{
+        .title = "fluxion-platform state test",
+        .width = 320,
+        .height = 240,
+        .resizable = true,
+        .decorated = true,
+        .visible = false,
+        .maximized = false,
+        .gl = null,
+    }));
+}
+
+fn postAndPump(impl: backend.Impl, queue: *backend.Queue, win: *Native, message: u32, wparam: WPARAM, lparam: LPARAM) !void {
+    queue.clear();
+    try testing.expect(cast(impl).u.PostMessageW(win.hwnd, message, wparam, lparam) != 0);
+    try vtable.pump(impl, queue);
+}
+
+test "minimising is one iconify and no size, and coming back says what it left" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const id: event.WindowId = @enumFromInt(3);
+    const win = try hiddenWindow(impl, id);
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    try vtable.pump(impl, &queue);
+
+    try postAndPump(impl, &queue, win, wm_size, size_minimized, 0);
+    try testing.expectEqual(event.Event{ .iconify = .{ .window = id, .value = true } }, queue.next().?);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
+
+    try postAndPump(impl, &queue, win, wm_size, size_maximized, 640 | (480 << 16));
+    try testing.expectEqual(event.Event{ .iconify = .{ .window = id, .value = false } }, queue.next().?);
+    try testing.expectEqual(event.Event{ .maximize = .{ .window = id, .value = true } }, queue.next().?);
+    try testing.expectEqual(event.Event{ .framebuffer_resize = .{ .window = id, .width = 640, .height = 480 } }, queue.next().?);
+
+    try postAndPump(impl, &queue, win, wm_size, size_minimized, 0);
+    try testing.expectEqual(event.Event{ .iconify = .{ .window = id, .value = true } }, queue.next().?);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
+
+    try postAndPump(impl, &queue, win, wm_size, size_restored, 640 | (480 << 16));
+    try testing.expectEqual(event.Event{ .iconify = .{ .window = id, .value = false } }, queue.next().?);
+    try testing.expectEqual(event.Event{ .maximize = .{ .window = id, .value = false } }, queue.next().?);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
+}
+
+test "a confining mode holds the pointer only while the window has focus" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    var was: Point = .{};
+    _ = self.u.GetCursorPos(&was);
+    defer _ = self.u.SetCursorPos(was.x, was.y);
+
+    const win = try hiddenWindow(impl, @enumFromInt(4));
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    try vtable.pump(impl, &queue);
+
+    try vtable.setCursorMode(impl, win, .captured);
+    try testing.expect(!win.held);
+
+    try postAndPump(impl, &queue, win, wm_setfocus, 0, 0);
+    try testing.expect(win.held);
+    try postAndPump(impl, &queue, win, wm_killfocus, 0, 0);
+    try testing.expect(!win.held);
+    try testing.expectEqual(cursor_mod.Mode.captured, win.mode);
+
+    const on_caption: LPARAM = (@as(LPARAM, wm_lbuttondown) << 16) | 2;
+    try postAndPump(impl, &queue, win, wm_mouseactivate, 0, on_caption);
+    try postAndPump(impl, &queue, win, wm_setfocus, 0, 0);
+    try testing.expect(!win.held);
+    try postAndPump(impl, &queue, win, wm_capturechanged, 0, 0);
+    try testing.expect(win.held);
+
+    try vtable.setCursorMode(impl, win, .normal);
+    try testing.expect(!win.held);
+}
+fn keyLparam(scancode: u32, extended: bool, up: bool) LPARAM {
+    var bits: usize = 1 | (@as(usize, scancode) << 16);
+    if (extended) bits |= 1 << 24;
+    if (up) bits |= 0xC000_0000;
+    return @bitCast(bits);
+}
+
+test "the left control Windows makes up for AltGr is no key, and AltGr is not control" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    const win = try hiddenWindow(impl, @enumFromInt(8));
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    try vtable.pump(impl, &queue);
+    queue.clear();
+
+    const control: WPARAM = @intCast(vk_control);
+    const menu: WPARAM = @intCast(vk_menu);
+    try testing.expect(self.u.PostMessageW(win.hwnd, wm_keydown, control, keyLparam(0x1D, false, false)) != 0);
+    try testing.expect(self.u.PostMessageW(win.hwnd, wm_keydown, menu, keyLparam(0x38, true, false)) != 0);
+    try vtable.pump(impl, &queue);
+    const pressed = queue.next().?.key;
+    try testing.expectEqual(keys.Key.right_alt, pressed.key);
+    try testing.expectEqual(keys.Action.press, pressed.action);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
+    try testing.expect(self.alt_graph);
+
+    queue.clear();
+    try testing.expect(self.u.PostMessageW(win.hwnd, wm_keyup, control, keyLparam(0x1D, false, true)) != 0);
+    try testing.expect(self.u.PostMessageW(win.hwnd, wm_keyup, menu, keyLparam(0x38, true, true)) != 0);
+    try vtable.pump(impl, &queue);
+    try testing.expectEqual(keys.Action.release, queue.next().?.key.action);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
+    try testing.expect(!self.alt_graph);
+
+    queue.clear();
+    try testing.expect(self.u.PostMessageW(win.hwnd, wm_keydown, control, keyLparam(0x1D, false, false)) != 0);
+    try vtable.pump(impl, &queue);
+    try testing.expectEqual(keys.Key.left_control, queue.next().?.key.key);
 }

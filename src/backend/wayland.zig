@@ -686,6 +686,7 @@ const Impl = struct {
     /// Set for the length of one `pump`, so a listener called from inside
     /// `wl_display_dispatch_pending` has somewhere to put what it produced.
     queue: ?*backend.Queue = null,
+    later: backend.Later = .{},
     push_failed: bool = false,
 
     /// Every `wl_output` the compositor has announced, in the order it
@@ -836,6 +837,10 @@ const Native = struct {
     locked: ?*Proxy = null,
     confined: ?*Proxy = null,
     relative: ?*Proxy = null,
+    /// Whether the compositor has the lock in force: only while the window has focus.
+    held: bool = false,
+    /// The outputs the surface is on, latest last, from `wl_surface.enter`.
+    entered: [4]?*Proxy = @splat(null),
     /// Set the first time the compositor answers the opening commit. Until it
     /// does, the two sides have not agreed that this window exists - so it is
     /// the one fact that says the whole handshake worked.
@@ -878,6 +883,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
     .clearContext = clearContext,
@@ -1130,7 +1136,42 @@ fn hidePointer(self: *Impl) void {
     _ = self.w.wl_display_flush(self.display);
 }
 
+/// A disabled window whose lock is not in force shows the pointer passing over it.
+fn pointerHidden(win: *const Native) bool {
+    return win.mode == .hidden or (win.mode == .disabled and win.held);
+}
+
+const LockedListener = extern struct {
+    locked: *const fn (?*anyopaque, *Proxy) callconv(.c) void,
+    unlocked: *const fn (?*anyopaque, *Proxy) callconv(.c) void,
+};
+
+const locked_listener: LockedListener = .{ .locked = onLocked, .unlocked = onUnlocked };
+
+/// A persistent lock is the compositor's to switch on and off with focus.
+fn onLocked(data: ?*anyopaque, proxy: *Proxy) callconv(.c) void {
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    const native = findByLock(self, proxy) orelse return;
+    native.held = true;
+    if (self.pointer_focus == native) hidePointer(self);
+}
+
+fn onUnlocked(data: ?*anyopaque, proxy: *Proxy) callconv(.c) void {
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    const native = findByLock(self, proxy) orelse return;
+    native.held = false;
+    if (self.pointer_focus == native) _ = showThemeCursor(self, native.shape);
+}
+
+fn findByLock(self: *Impl, proxy: *Proxy) ?*Native {
+    for (self.windows.values()) |native| {
+        if (native.locked == proxy) return native;
+    }
+    return null;
+}
+
 fn releaseConstraint(self: *Impl, win: *Native) void {
+    win.held = false;
     if (win.locked) |p| {
         requestDestroy(self, p, locked_pointer_destroy);
         win.locked = null;
@@ -1150,7 +1191,7 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
     const win = castWindow(native);
     win.shape = shape;
 
-    if (win.mode.hides()) return;
+    if (pointerHidden(win)) return;
     if (!showThemeCursor(self, shape)) return error.Unavailable;
 }
 
@@ -1162,7 +1203,7 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
     releaseConstraint(self, win);
     win.mode = mode;
 
-    if (mode.hides()) hidePointer(self) else _ = showThemeCursor(self, win.shape);
+    if (pointerHidden(win)) hidePointer(self) else _ = showThemeCursor(self, win.shape);
 
     if (!mode.confines()) {
         _ = self.w.wl_display_flush(self.display);
@@ -1200,6 +1241,7 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
             1,
             &args,
         );
+        if (win.locked) |proxy| _ = self.w.wl_proxy_add_listener(proxy, &locked_listener, self);
 
         // The lock stops the pointer moving; the relative pointer is what
         // still reports the hand. Without both, a disabled cursor is a frozen
@@ -1282,6 +1324,8 @@ fn onRelativeMotion(
     _ = .{ proxy, utime_hi, utime_lo, dx, dy };
     const self: *Impl = @ptrCast(@alignCast(data.?));
     const native = self.pointer_focus orelse return;
+    // Without the lock in force the pointer passing over is not the camera's.
+    if (!native.held) return;
 
     push(self, .{ .cursor = .{
         .window = native.id,
@@ -1323,6 +1367,7 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     }
     if (self.data_manager) |manager| w.wl_proxy_destroy(manager);
     self.clipboard_text.deinit(gpa);
+    self.later.deinit(gpa);
 
     if (self.pointer) |p| requestDestroy(self, p, pointer_release);
     if (self.keyboard) |k| requestDestroy(self, k, keyboard_release);
@@ -1420,6 +1465,7 @@ fn onGlobalRemove(data: ?*anyopaque, registry: *Proxy, name: u32) callconv(.c) v
 
     for (self.outputs.items, 0..) |out, index| {
         if (out.global != name) continue;
+        for (self.windows.values()) |native| forgetOutput(native, out.proxy);
         _ = self.outputs.orderedRemove(index);
         destroyOutput(self, out);
         return;
@@ -1838,7 +1884,7 @@ fn onPointerEnter(
 
     // A client must set a cursor on entering, or the pointer is left as
     // whatever the last program made it.
-    if (native.mode.hides()) hidePointer(self) else _ = showThemeCursor(self, native.shape);
+    if (pointerHidden(native)) hidePointer(self) else _ = showThemeCursor(self, native.shape);
 
     self.pointer_focus = native;
     native.last_x = fixedToDouble(x);
@@ -2099,6 +2145,7 @@ const xkb_control: u32 = 1 << 2;
 const xkb_mod1: u32 = 1 << 3;
 const xkb_mod2: u32 = 1 << 4;
 const xkb_mod4: u32 = 1 << 6;
+const xkb_mod5: u32 = 1 << 7;
 
 fn modsFromXkb(depressed: u32, locked: u32) keys.Mods {
     return .{
@@ -2108,6 +2155,7 @@ fn modsFromXkb(depressed: u32, locked: u32) keys.Mods {
         .super = depressed & xkb_mod4 != 0,
         .caps_lock = locked & xkb_lock != 0,
         .num_lock = locked & xkb_mod2 != 0,
+        .alt_graph = depressed & xkb_mod5 != 0,
     };
 }
 
@@ -2193,6 +2241,10 @@ fn onToplevelConfigure(
     // The state array is the whole truth: anything not in it is off. So the
     // flags are cleared first rather than only set.
     const was_fullscreen = native.fullscreen;
+    const was_maximized = native.maximized;
+    defer {
+        if (native.maximized != was_maximized) push(self, .{ .maximize = .{ .window = native.id, .value = native.maximized } });
+    }
     native.maximized = false;
     native.activated = false;
     native.fullscreen = false;
@@ -2234,6 +2286,75 @@ fn onToplevelClose(data: ?*anyopaque, toplevel: *Proxy) callconv(.c) void {
     push(self, .{ .close = native.id });
 }
 
+/// `wl_surface`'s events to version 6; the scale and transform hints are not used yet.
+const SurfaceListener = extern struct {
+    enter: *const fn (?*anyopaque, *Proxy, ?*Proxy) callconv(.c) void,
+    leave: *const fn (?*anyopaque, *Proxy, ?*Proxy) callconv(.c) void,
+    preferred_buffer_scale: *const fn (?*anyopaque, *Proxy, i32) callconv(.c) void,
+    preferred_buffer_transform: *const fn (?*anyopaque, *Proxy, u32) callconv(.c) void,
+};
+
+const surface_listener: SurfaceListener = .{
+    .enter = onSurfaceEnter,
+    .leave = onSurfaceLeave,
+    .preferred_buffer_scale = onSurfaceScale,
+    .preferred_buffer_transform = onSurfaceTransform,
+};
+
+fn onSurfaceEnter(data: ?*anyopaque, surface: *Proxy, output: ?*Proxy) callconv(.c) void {
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    const native = self.windows.get(@intFromPtr(surface)) orelse return;
+    enterOutput(native, output orelse return);
+}
+
+fn enterOutput(native: *Native, output: *Proxy) void {
+    forgetOutput(native, output);
+    std.mem.copyForwards(?*Proxy, native.entered[0 .. native.entered.len - 1], native.entered[1..]);
+    native.entered[native.entered.len - 1] = output;
+}
+
+fn onSurfaceLeave(data: ?*anyopaque, surface: *Proxy, output: ?*Proxy) callconv(.c) void {
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    const native = self.windows.get(@intFromPtr(surface)) orelse return;
+    forgetOutput(native, output orelse return);
+}
+
+fn onSurfaceScale(data: ?*anyopaque, surface: *Proxy, factor: i32) callconv(.c) void {
+    _ = .{ data, surface, factor };
+}
+
+fn onSurfaceTransform(data: ?*anyopaque, surface: *Proxy, transform: u32) callconv(.c) void {
+    _ = .{ data, surface, transform };
+}
+
+/// Keeps the rest in order and packed at the end, nulls first.
+fn forgetOutput(native: *Native, output: *Proxy) void {
+    var kept: usize = native.entered.len;
+    var index: usize = native.entered.len;
+    while (index > 0) {
+        index -= 1;
+        const one = native.entered[index] orelse continue;
+        if (one == output) continue;
+        kept -= 1;
+        native.entered[kept] = one;
+    }
+    @memset(native.entered[0..kept], null);
+}
+
+/// The output the surface entered last, found in the list by where it is.
+fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
+    const self = cast(impl);
+    const win = castWindow(native);
+    const latest = win.entered[win.entered.len - 1] orelse return null;
+    for (self.outputs.items) |out| {
+        if (out.proxy != latest) continue;
+        for (list, 0..) |mon, index| {
+            if (mon.bounds.x == out.x and mon.bounds.y == out.y) return index;
+        }
+    }
+    return null;
+}
+
 fn findByToplevel(self: *Impl, toplevel: *Proxy) ?*Native {
     var it = self.windows.iterator();
     while (it.next()) |entry| {
@@ -2245,7 +2366,7 @@ fn findByToplevel(self: *Impl, toplevel: *Proxy) ?*Native {
 /// Push, or remember there was no room. A listener cannot fail, so the failure
 /// is carried to the end of `pump`.
 fn push(self: *Impl, ev: event.Event) void {
-    const queue = self.queue orelse return;
+    const queue = self.queue orelse return self.later.keep(self.gpa, ev);
     queue.push(ev) catch {
         self.push_failed = true;
     };
@@ -2302,6 +2423,10 @@ fn createWindow(
 
     _ = w.wl_proxy_add_listener(xdg_surface, &xdg_surface_listener, self);
     _ = w.wl_proxy_add_listener(toplevel, &toplevel_listener, self);
+    // Only as long as the installed library expects, as for `wl_output`.
+    if (self.core.wl_surface_interface.event_count <= @typeInfo(SurfaceListener).@"struct".fields.len) {
+        _ = w.wl_proxy_add_listener(surface, &surface_listener, self);
+    }
 
     native.* = .{
         .surface = surface,
@@ -2999,6 +3124,12 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
 
     request(self, win.surface, surface_commit, null);
     _ = self.w.wl_display_flush(self.display);
+
+    // A floating window's size is the client's to choose, so it is chosen here.
+    if (win.maximized or win.fullscreen) return;
+    const now: [2]u32 = .{ win.width, win.height };
+    const inside = limits.clamp(now);
+    if (!std.meta.eql(inside, now)) applySize(self, win, inside[0], inside[1]);
 }
 
 /// Transparency is in the pixels a program draws.
@@ -3026,6 +3157,9 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
 
     // The last answer's paths were promised until now.
     _ = self.answers.reset(.retain_capacity);
+    self.later.hand(queue) catch {
+        self.push_failed = true;
+    };
     answerDialog(self);
 
     // Anything already in the client's buffer, then whatever is on the socket.
@@ -3265,11 +3399,85 @@ test "a listener is one function pointer per event, in order" {
     try testing.expectEqual(@as(usize, 6), @typeInfo(DataDeviceListener).@"struct".fields.len);
     try testing.expectEqual(@as(usize, 3), @typeInfo(DataOfferListener).@"struct".fields.len);
     try testing.expectEqual(@as(usize, 6), @typeInfo(DataSourceListener).@"struct".fields.len);
+    try testing.expectEqual(@as(usize, 4), @typeInfo(SurfaceListener).@"struct".fields.len);
+    buildPointerInterfaces(fakeCore());
+    try testing.expectEqual(
+        @as(usize, @intCast(locked_pointer_interface.event_count)),
+        @typeInfo(LockedListener).@"struct".fields.len,
+    );
 
     // And every entry is a pointer, so the struct is the flat array C expects.
     inline for (@typeInfo(PointerListener).@"struct".fields) |field| {
         try testing.expectEqual(@sizeOf(usize), @sizeOf(field.type));
     }
+}
+
+fn fakeNative(self: *Impl, toplevel: *Proxy) Native {
+    return .{
+        .surface = @ptrFromInt(0x1000),
+        .xdg_surface = @ptrFromInt(0x2000),
+        .toplevel = toplevel,
+        .id = @enumFromInt(5),
+        .impl = self,
+        .width = 640,
+        .height = 480,
+    };
+}
+
+test "the outputs a surface is on are kept latest last, and one that goes is forgotten" {
+    var self: Impl = undefined;
+    var native = fakeNative(&self, @ptrFromInt(0x3000));
+    const left: *Proxy = @ptrFromInt(0x10);
+    const right: *Proxy = @ptrFromInt(0x20);
+    const third: *Proxy = @ptrFromInt(0x30);
+
+    enterOutput(&native, left);
+    enterOutput(&native, right);
+    try testing.expectEqual(@as(?*Proxy, right), native.entered[native.entered.len - 1]);
+
+    enterOutput(&native, left);
+    try testing.expectEqual(@as(?*Proxy, left), native.entered[native.entered.len - 1]);
+    try testing.expectEqual(@as(?*Proxy, right), native.entered[native.entered.len - 2]);
+
+    forgetOutput(&native, left);
+    try testing.expectEqual(@as(?*Proxy, right), native.entered[native.entered.len - 1]);
+    forgetOutput(&native, third);
+    forgetOutput(&native, right);
+    try testing.expectEqual(@as(?*Proxy, null), native.entered[native.entered.len - 1]);
+
+    for (0..10) |i| enterOutput(&native, @ptrFromInt(0x100 + 0x10 * i));
+    try testing.expectEqual(@as(?*Proxy, @ptrFromInt(0x190)), native.entered[native.entered.len - 1]);
+    try testing.expectEqual(@as(?*Proxy, @ptrFromInt(0x160)), native.entered[0]);
+}
+
+test "the compositor maximising and restoring the window comes out as events" {
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    var self: Impl = undefined;
+    self.gpa = testing.allocator;
+    self.windows = .empty;
+    self.queue = &queue;
+    self.later = .{};
+    self.push_failed = false;
+    defer self.windows.deinit(testing.allocator);
+
+    const toplevel: *Proxy = @ptrFromInt(0x3000);
+    var native = fakeNative(&self, toplevel);
+    try self.windows.put(testing.allocator, @intFromPtr(native.surface), &native);
+
+    var states = [_]u32{ toplevel_state_maximized, toplevel_state_activated };
+    var maximized: WlArray = .{ .size = @sizeOf(@TypeOf(states)), .alloc = 0, .data = &states };
+    onToplevelConfigure(&self, toplevel, 1280, 720, &maximized);
+    try testing.expectEqual(event.Event{ .maximize = .{ .window = native.id, .value = true } }, queue.next().?);
+    try testing.expect(native.maximized and native.activated);
+
+    onToplevelConfigure(&self, toplevel, 1280, 720, &maximized);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
+
+    var none: WlArray = .{ .size = 0, .alloc = 0, .data = null };
+    onToplevelConfigure(&self, toplevel, 0, 0, &none);
+    try testing.expectEqual(event.Event{ .maximize = .{ .window = native.id, .value = false } }, queue.next().?);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
 }
 
 test "the clipboard's opcodes name the messages they are used for" {
@@ -3313,6 +3521,7 @@ test "modifier masks map onto the same bits everywhere" {
     // The locks are read from the locked mask, not the depressed one.
     try testing.expectEqual(keys.Mods{ .caps_lock = true }, modsFromXkb(0, xkb_lock));
     try testing.expectEqual(keys.Mods{ .num_lock = true }, modsFromXkb(0, xkb_mod2));
+    try testing.expectEqual(keys.Mods{ .alt_graph = true }, modsFromXkb(xkb_mod5, 0));
     try testing.expectEqual(keys.Mods.none, modsFromXkb(0, 0));
 }
 

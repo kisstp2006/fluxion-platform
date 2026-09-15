@@ -46,6 +46,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
     .clearContext = clearContext,
@@ -154,6 +155,11 @@ fn enumerateMonitors(
     gpa: Allocator,
 ) Error!void {
     _ = .{ impl, list, modes, gpa };
+}
+
+fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
+    _ = .{ impl, native, list };
+    return null;
 }
 
 /// No keyboard, so no text and no input method to compose it with.

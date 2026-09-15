@@ -81,14 +81,14 @@ const close_on_exec: c_uint = if (@hasDecl(posix.SOCK, "CLOEXEC")) posix.SOCK.CL
 /// dialog there is. A bus that has not answered by then is not one to use.
 const probe_timeout_ms: c_int = 1000;
 
-const Failure = error{ Failed, Cancelled, TimedOut, Closed } || dbus.Error || Allocator.Error;
+pub const Failure = error{ Failed, Cancelled, TimedOut, Closed } || dbus.Error || Allocator.Error;
 
 // -------------------------------------------------------------------------
 // The session bus
 // -------------------------------------------------------------------------
 
-/// One connection to the session bus, logged in and named.
-const Bus = struct {
+/// One connection to the session bus, logged in and named. shell borrows it too.
+pub const Bus = struct {
     fd: c_int,
     serial: u32 = 0,
     /// What has arrived and not been read: the message `next` last handed out
@@ -98,7 +98,7 @@ const Bus = struct {
     name_bytes: [128]u8 = undefined,
     name_len: usize = 0,
 
-    fn open() ?Bus {
+    pub fn open() ?Bus {
         var bus: Bus = .{ .fd = connectSession() orelse return null };
         if (!bus.login() or !bus.hello()) {
             bus.close();
@@ -107,7 +107,7 @@ const Bus = struct {
         return bus;
     }
 
-    fn close(self: *Bus) void {
+    pub fn close(self: *Bus) void {
         _ = c.close(self.fd);
         self.buffer.deinit(heap);
         self.fd = -1;
@@ -117,7 +117,7 @@ const Bus = struct {
         return self.name_bytes[0..self.name_len];
     }
 
-    fn nextSerial(self: *Bus) u32 {
+    pub fn nextSerial(self: *Bus) u32 {
         self.serial +%= 1;
         if (self.serial == 0) self.serial = 1;
         return self.serial;
@@ -187,7 +187,7 @@ const Bus = struct {
 
     /// Send a call and wait for its answer, passing over anything else that
     /// arrives meanwhile - the bus's own signals, mostly.
-    fn call(self: *Bus, w: *dbus.Writer, cancel: c_int, timeout_ms: c_int) Failure!dbus.Header {
+    pub fn call(self: *Bus, w: *dbus.Writer, cancel: c_int, timeout_ms: c_int) Failure!dbus.Header {
         const message = w.finish();
         const serial = std.mem.readInt(u32, message[8..12], .little);
         if (!self.sendAll(message)) return error.Closed;
@@ -282,7 +282,7 @@ fn findTool(buffer: *[512]u8) ?struct { portal.Tool, [:0]const u8 } {
     return null;
 }
 
-fn onPath(buffer: *[512]u8, program: []const u8) ?[:0]const u8 {
+pub fn onPath(buffer: *[512]u8, program: []const u8) ?[:0]const u8 {
     var dirs = std.mem.splitScalar(u8, std.mem.span(c.getenv("PATH") orelse "/usr/bin:/bin"), ':');
     while (dirs.next()) |dir| {
         if (dir.len == 0) continue;

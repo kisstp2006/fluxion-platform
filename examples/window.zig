@@ -19,8 +19,8 @@ const platform = @import("fluxion_platform");
 /// f11 fills the monitor the window is on; f10 does it by switching that
 /// monitor to its largest mode instead; f9 puts everything back.
 ///
-/// Which monitor is worked out from where the window is, because a window
-/// dragged to the second screen should fill the second screen.
+/// The monitor the window is on, because a window dragged to the second
+/// screen should fill the second screen.
 fn fullscreenKey(
     ctx: *platform.Context,
     win: platform.Window,
@@ -33,13 +33,8 @@ fn fullscreenKey(
             try out.writeAll("       windowed\n");
         },
         .f10, .f11 => {
-            const at = win.position();
             const screens = ctx.monitors();
-            var index: usize = 0;
-            for (screens, 0..) |*mon, i| {
-                if (mon.bounds.contains(at[0], at[1])) index = i;
-            }
-            if (screens.len == 0) return error.Unavailable;
+            const index = win.monitor() orelse return error.Unavailable;
 
             if (key == .f11) {
                 try win.setFullscreen(.{ .borderless = index });
@@ -153,6 +148,8 @@ pub fn main(init: std.process.Init) !void {
             .resize => |r| try out.print("size   {d}x{d}\n", .{ r.width, r.height }),
             .scale => |s| try out.print("scale  {d:.2}\n", .{s.x}),
             .focus => |f| try out.print("focus  {}\n", .{f.value}),
+            .iconify => |s| try out.print("minimised {}\n", .{s.value}),
+            .maximize => |s| try out.print("maximised {}\n", .{s.value}),
 
             // The Android pair. Never sent by a desktop backend, and handled
             // here so that this example is a correct program on a phone too.

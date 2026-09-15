@@ -211,14 +211,19 @@ pub const Dialog = struct {
 
         const arena = self.strings.allocator();
         if (request.title) |title| self.title = try wide(arena, title);
-        if (request.initial_folder) |folder| {
-            self.initial_folder = std.unicode.wtf8ToWtf16LeAllocZ(arena, folder) catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.InvalidWtf8 => error.Unavailable,
-            };
-        }
+        if (request.initial_folder) |folder| self.initial_folder = try parsingName(arena, folder);
         self.filters = try filterSpecs(arena, request.filters);
         return self;
+    }
+
+    /// The shell parses only backslashes, and every other Windows call takes either.
+    fn parsingName(arena: Allocator, folder: []const u8) Error![:0]u16 {
+        const path = std.unicode.wtf8ToWtf16LeAllocZ(arena, folder) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidWtf8 => error.Unavailable,
+        };
+        std.mem.replaceScalar(u16, path, '/', '\\');
+        return path;
     }
 
     pub fn spawn(self: *Dialog) Error!void {
@@ -410,6 +415,14 @@ test "a filter is written the way Windows writes one" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     try testing.expectEqualStrings("*.png;*.jpg;*.tar.gz;*.*", try pattern(arena.allocator(), &.{ "png", ".jpg", "tar.gz", "*" }));
+}
+
+test "a folder to start in may be written with either slash" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const path = try Dialog.parsingName(arena.allocator(), "C:/Users/me/Documents\\Projects");
+    try testing.expectEqualSlices(u16, std.unicode.utf8ToUtf16LeStringLiteral("C:\\Users\\me\\Documents\\Projects"), path);
+    try testing.expectError(error.Unavailable, Dialog.parsingName(arena.allocator(), "\xFF"));
 }
 
 test "the options ask for files that exist, or for folders, and never move the working directory" {

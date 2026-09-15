@@ -110,6 +110,10 @@ pub const Page = struct {
     dialog: ?Dialog = null,
     /// The files of the last answer, as the glue would have read them.
     chosen: []const []const u8 = &.{},
+    /// What `openUrl` was last handed, and whether the page lets windows open.
+    url_bytes: [256]u8 = undefined,
+    url_len: usize = 0,
+    popups: bool = true,
 };
 
 /// A file dialog, as `openFileDialog` was asked for it.
@@ -471,6 +475,13 @@ pub fn chosenRead(index: u32, ptr: [*]u8, len: u32) u32 {
     const kept = @min(len, file.len);
     @memcpy(ptr[0..kept], file[0..kept]);
     return @intCast(kept);
+}
+
+pub fn openUrl(ptr: [*]const u8, len: u32) u32 {
+    if (!page.popups) return 0;
+    page.url_len = @min(len, page.url_bytes.len);
+    @memcpy(page.url_bytes[0..page.url_len], ptr[0..page.url_len]);
+    return 1;
 }
 
 // -------------------------------------------------------------------------

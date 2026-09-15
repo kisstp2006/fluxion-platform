@@ -51,6 +51,7 @@ const text_mod = @import("../text.zig");
 const android_text = @import("android_text.zig");
 const android_clipboard = @import("android_clipboard.zig");
 const android_dialog = @import("android_dialog.zig");
+const android_shell = @import("android_shell.zig");
 const jni = @import("jni.zig");
 const virtual_key = @import("virtual_key.zig");
 const keys = @import("../keys.zig");
@@ -584,6 +585,30 @@ fn liveActivity() ?*ANativeActivity {
     return glue.activity;
 }
 
+/// The app's own storage, for `folders`: private, and the one a file manager sees.
+pub fn storagePaths() ?struct { internal: ?[*:0]const u8, external: ?[*:0]const u8 } {
+    const activity = liveActivity() orelse return null;
+    return .{ .internal = activity.internalDataPath, .external = activity.externalDataPath };
+}
+
+/// For `shell`, from whichever thread asks: attached to the VM for the call
+/// if nothing had attached it, and let go again after, or it could not exit.
+pub fn viewUri(gpa: Allocator, uri: []const u8) Allocator.Error!android_shell.Outcome {
+    const activity = liveActivity() orelse return .unavailable;
+    const vm: jni.JavaVm = @ptrCast(@alignCast(activity.vm orelse return .unavailable));
+    const get_env = vm.*.GetEnv orelse return .unavailable;
+    var found: ?*anyopaque = null;
+    if (get_env(vm, &found, jni.version_1_6) == jni.ok and found != null) {
+        return android_shell.view(@ptrCast(@alignCast(found.?)), activity.clazz, gpa, uri);
+    }
+    const attach = vm.*.AttachCurrentThread orelse return .unavailable;
+    const detach = vm.*.DetachCurrentThread orelse return .unavailable;
+    var env: jni.JniEnv = undefined;
+    if (attach(vm, &env, null) != jni.ok) return .unavailable;
+    defer _ = detach(vm);
+    return android_shell.view(env, activity.clazz, gpa, uri);
+}
+
 // -------------------------------------------------------------------------
 // The backend proper
 // -------------------------------------------------------------------------
@@ -659,6 +684,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
     .clearContext = clearContext,
@@ -1212,6 +1238,11 @@ fn enumerateMonitors(
     try list.append(gpa, mon);
 }
 
+fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
+    _ = .{ impl, native };
+    return if (list.len == 0) null else 0;
+}
+
 /// Nothing to do, and nothing to refuse.
 ///
 /// An Android window is already the whole screen, so being fullscreen is not a
@@ -1415,7 +1446,7 @@ pub fn handleCommand(self: *Impl, cmd: Cmd) Error!void {
                 const width: u32 = @intCast(@max(0, self.a.ANativeWindow_getWidth(w)));
                 const height: u32 = @intCast(@max(0, self.a.ANativeWindow_getHeight(w)));
                 if (self.native) |native| {
-                    if (width != native.width or height != native.height) {
+                    if (width != 0 and height != 0 and (width != native.width or height != native.height)) {
                         native.width = width;
                         native.height = height;
                         push(self, .{ .framebuffer_resize = .{

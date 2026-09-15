@@ -78,6 +78,12 @@ pub const text = @import("text.zig");
 pub const dialog = @import("dialog.zig");
 /// A file or a folder moved to the system's trash. See `trash`.
 pub const trash = @import("trash.zig");
+/// Home, documents, and where settings, data and a cache go. See `folders`.
+pub const folders = @import("folders.zig");
+/// The font the system draws its interface in. See `fonts`.
+pub const fonts = @import("fonts.zig");
+/// A file, a folder or an address handed to the system. See `shell`.
+pub const shell = @import("shell.zig");
 /// The console and the panic handler a browser build needs. See `web`.
 pub const web = @import("web.zig");
 
@@ -174,6 +180,10 @@ test {
     _ = text;
     _ = dialog;
     _ = trash;
+    _ = folders;
+    _ = fonts;
+    _ = shell;
+    _ = @import("backend/unix_shell.zig");
     _ = web;
     _ = @import("window_ops_test.zig");
     _ = @import("cursor_test.zig");

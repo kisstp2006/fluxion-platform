@@ -161,6 +161,61 @@ test "a size that was set is a size that reads back" {
     try testing.expectEqual(wanted_h, fb[1]);
 }
 
+test "a window outside new size limits is brought inside them at once" {
+    var fixture: Fixture = .{};
+    if (!fixture.open()) return error.SkipZigTest;
+    defer fixture.close();
+
+    const win = fixture.win;
+    win.setSizeLimits(.{ .min_width = 480, .min_height = 360 }) catch |err| switch (err) {
+        error.Unavailable => return,
+        else => return err,
+    };
+
+    const scale = win.contentScale();
+    const scaled: [2]u32 = .{ @intFromFloat(@round(480 * scale[0])), @intFromFloat(@round(360 * scale[1])) };
+    var fb = win.framebufferSize();
+    for (0..50) |_| {
+        if (std.meta.eql(fb, [2]u32{ 480, 360 }) or std.meta.eql(fb, scaled)) return;
+        try fixture.ctx.pumpWait(20);
+        fb = win.framebufferSize();
+    }
+    try testing.expectEqual(scaled, fb);
+}
+
+test "restoring a window minimised from maximised brings it back at its own size" {
+    var fixture: Fixture = .{};
+    if (!fixture.open()) return error.SkipZigTest;
+    defer fixture.close();
+
+    const win = fixture.win;
+    win.maximize() catch return;
+    for (0..20) |_| if (!win.isMaximized()) try fixture.ctx.pumpWait(10);
+    if (!win.isMaximized()) return;
+    win.iconify() catch return;
+    for (0..20) |_| if (!win.isIconified()) try fixture.ctx.pumpWait(10);
+    if (!win.isIconified()) return;
+
+    try win.restore();
+    for (0..50) |_| {
+        if (!win.isIconified() and !win.isMaximized()) return;
+        try fixture.ctx.pumpWait(20);
+    }
+    try testing.expect(!win.isIconified());
+    try testing.expect(!win.isMaximized());
+}
+
+test "a window knows which of the monitors it is on" {
+    var fixture: Fixture = .{};
+    if (!fixture.open()) return error.SkipZigTest;
+    defer fixture.close();
+
+    const count = fixture.ctx.monitors().len;
+    const index = fixture.win.monitor();
+    if (count == 0) return testing.expectEqual(@as(?usize, null), index);
+    try testing.expect(index.? < count);
+}
+
 test "the polled state starts empty and follows the events" {
     var fixture: Fixture = .{};
     if (!fixture.open()) return error.SkipZigTest;

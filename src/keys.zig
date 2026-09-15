@@ -256,7 +256,10 @@ pub const Mods = packed struct(u8) {
     super: bool = false,
     caps_lock: bool = false,
     num_lock: bool = false,
-    _padding: u2 = 0,
+    /// AltGr, the right alt that types a layout's third level. Windows reports
+    /// it as control and alt; here it is neither, so `control` is only Ctrl.
+    alt_graph: bool = false,
+    _padding: u1 = 0,
 
     pub const none: Mods = .{};
 

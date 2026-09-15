@@ -75,7 +75,7 @@ const PAD_SIZE = 312;
 const PAD_ID = 128;
 
 /// `keys.Mods`, bit for bit.
-const MOD = { shift: 1, control: 2, alt: 4, super: 8, capsLock: 16, numLock: 32 };
+const MOD = { shift: 1, control: 2, alt: 4, super: 8, capsLock: 16, numLock: 32, altGraph: 64 };
 
 /// `createWindow`'s flags, and its context flags.
 const FLAG = { resizable: 1, decorated: 2, visible: 4, maximized: 8 };
@@ -200,6 +200,8 @@ function modsOf(event) {
   if (event.metaKey) bits |= MOD.super;
   if (event.getModifierState?.("CapsLock")) bits |= MOD.capsLock;
   if (event.getModifierState?.("NumLock")) bits |= MOD.numLock;
+  // Windows browsers report AltGr as control and alt as well.
+  if (event.getModifierState?.("AltGraph")) bits = (bits & ~(MOD.control | MOD.alt)) | MOD.altGraph;
   return bits;
 }
 
@@ -713,6 +715,16 @@ export class Platform {
           const count = Math.min(len >>> 0, file.bytes.length);
           self.u8.set(file.bytes.subarray(0, count), ptr >>> 0);
           return count;
+        },
+
+        openUrl: (ptr, len) => {
+          // Not "noopener", which makes `open` answer null even when it worked.
+          const opened = globalThis.open?.(self.text(ptr, len), "_blank");
+          if (!opened) return 0;
+          try {
+            opened.opener = null;
+          } catch {}
+          return 1;
         },
       },
     };

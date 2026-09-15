@@ -171,6 +171,43 @@ pub fn pathFromUri(gpa: Allocator, uri: []const u8) Allocator.Error!?[]u8 {
     return try gpa.realloc(out, len);
 }
 
+/// `file://` and an absolute path, with every byte a URI would not carry as
+/// it is written as `%XX` - the reverse of `pathFromUri`.
+pub fn fileUri(gpa: Allocator, absolute: []const u8) Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(gpa);
+    try out.appendSlice(gpa, "file://");
+    for (absolute) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "-_.~/", byte) != null) {
+            try out.append(gpa, byte);
+        } else try out.print(gpa, "%{X:0>2}", .{byte});
+    }
+    return out.toOwnedSlice(gpa);
+}
+
+pub const open_uri = "org.freedesktop.portal.OpenURI";
+pub const file_manager = "org.freedesktop.FileManager1";
+pub const file_manager_path = "/org/freedesktop/FileManager1";
+
+/// `OpenURI(parent_window, uri, options)`: a web address, or anything but a
+/// `file://`, which the portal only takes as an open file.
+pub fn writeOpenUri(w: *dbus.Writer, serial: u32, uri: []const u8) Allocator.Error!void {
+    try w.call(serial, .{ .destination = service, .path = path, .interface = open_uri, .member = "OpenURI", .signature = "ssa{sv}" });
+    try w.string("");
+    try w.string(uri);
+    const options = try w.beginArray(8);
+    w.endArray(options);
+}
+
+/// `ShowItems(uris, startup_id)`: the file manager opens the folder with them selected.
+pub fn writeShowItems(w: *dbus.Writer, serial: u32, uri: []const u8) Allocator.Error!void {
+    try w.call(serial, .{ .destination = file_manager, .path = file_manager_path, .interface = file_manager, .member = "ShowItems", .signature = "ass" });
+    const uris = try w.beginArray(4);
+    try w.string(uri);
+    w.endArray(uris);
+    try w.string("");
+}
+
 // -------------------------------------------------------------------------
 // zenity and kdialog, for a desktop with no portal
 // -------------------------------------------------------------------------
@@ -363,6 +400,38 @@ test "a URI that is not a local file names no path" {
     const odd = (try pathFromUri(testing.allocator, "FILE:///100%25/%zz")).?;
     defer testing.allocator.free(odd);
     try testing.expectEqualStrings("/100%/%zz", odd);
+}
+
+test "a path becomes a file URI and comes back the same" {
+    const uri = try fileUri(testing.allocator, "/home/tamás/My Docs/a#b%.png");
+    defer testing.allocator.free(uri);
+    try testing.expectEqualStrings("file:///home/tam%C3%A1s/My%20Docs/a%23b%25.png", uri);
+    const back = (try pathFromUri(testing.allocator, uri)).?;
+    defer testing.allocator.free(back);
+    try testing.expectEqualStrings("/home/tamás/My Docs/a#b%.png", back);
+}
+
+test "the file manager is asked to show one item, and the portal to open one address" {
+    var w: dbus.Writer = .{ .gpa = testing.allocator };
+    defer w.deinit();
+    try writeShowItems(&w, 3, "file:///home/me/level.json");
+    const shown = try dbus.parse(w.finish());
+    try testing.expectEqualStrings(file_manager, shown.interface);
+    try testing.expectEqualStrings("ShowItems", shown.member);
+    try testing.expectEqualStrings("ass", shown.signature);
+    var body = shown.body;
+    const end = try body.beginArray("s");
+    try testing.expectEqualStrings("file:///home/me/level.json", try body.string());
+    try testing.expectEqual(end, body.pos);
+    try testing.expectEqualStrings("", try body.string());
+
+    try writeOpenUri(&w, 4, "https://ziglang.org/");
+    const opened = try dbus.parse(w.finish());
+    try testing.expectEqualStrings(open_uri, opened.interface);
+    try testing.expectEqualStrings("ssa{sv}", opened.signature);
+    body = opened.body;
+    try testing.expectEqualStrings("", try body.string());
+    try testing.expectEqualStrings("https://ziglang.org/", try body.string());
 }
 
 test "zenity and kdialog are told the same thing in their own words" {
