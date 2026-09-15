@@ -40,6 +40,8 @@ const dyn = @import("fluxion_dyn");
 
 const backend = @import("../backend.zig");
 const event = @import("../event.zig");
+const input = @import("../input.zig");
+const kdeglobals = @import("kdeglobals.zig");
 const monitor = @import("../monitor.zig");
 const gamepad = @import("../gamepad.zig");
 const linux_gamepad = @import("linux_gamepad.zig");
@@ -883,6 +885,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .scrollLines = scrollLines,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -2339,6 +2342,11 @@ fn forgetOutput(native: *Native, output: *Proxy) void {
         native.entered[kept] = one;
     }
     @memset(native.entered[0..kept], null);
+}
+
+fn scrollLines(impl: backend.Impl) input.ScrollLines {
+    _ = impl;
+    return kdeglobals.scrollLines();
 }
 
 /// The output the surface entered last, found in the list by where it is.

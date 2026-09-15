@@ -29,6 +29,7 @@ const dyn = @import("fluxion_dyn");
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
 const event = @import("../event.zig");
+const input = @import("../input.zig");
 const monitor = @import("../monitor.zig");
 const gamepad = @import("../gamepad.zig");
 const xinput = @import("xinput.zig");
@@ -439,6 +440,7 @@ const User32 = struct {
     LoadCursorW: *const fn (?HINSTANCE, ?*const anyopaque) callconv(.winapi) ?HCURSOR,
     GetKeyState: *const fn (i32) callconv(.winapi) i16,
     GetMessageTime: *const fn () callconv(.winapi) i32,
+    SystemParametersInfoW: *const fn (u32, u32, ?*anyopaque, u32) callconv(.winapi) i32,
     /// A virtual key into a scan code, for a keystroke that arrived without
     /// one. See `scancodeFrom`.
     MapVirtualKeyW: *const fn (u32, u32) callconv(.winapi) u32,
@@ -720,6 +722,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .scrollLines = scrollLines,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -1718,6 +1721,21 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
     const now = framebufferSize(impl, native);
     const inside = limits.clamp(now);
     if (!std.meta.eql(inside, now)) try setSize(impl, native, inside[0], inside[1]);
+}
+
+const spi_getwheelscrolllines: u32 = 0x0068;
+const spi_getwheelscrollchars: u32 = 0x006C;
+/// `WHEEL_PAGESCROLL`: the user chose a screen at a time.
+const wheel_pagescroll: u32 = 0xFFFFFFFF;
+
+fn scrollLines(impl: backend.Impl) input.ScrollLines {
+    const self = cast(impl);
+    var lines: u32 = 3;
+    var chars: u32 = 3;
+    _ = self.u.SystemParametersInfoW(spi_getwheelscrolllines, 0, &lines, 0);
+    _ = self.u.SystemParametersInfoW(spi_getwheelscrollchars, 0, &chars, 0);
+    if (lines == wheel_pagescroll) return .{ .x = @floatFromInt(chars), .y = 1, .page = true };
+    return .{ .x = @floatFromInt(chars), .y = @floatFromInt(lines) };
 }
 
 /// Matched by corner, because a mode change leaves the list's sizes stale.

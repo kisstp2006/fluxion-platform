@@ -61,6 +61,7 @@ const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
 const dialog = @import("../dialog.zig");
 const event = @import("../event.zig");
+const input = @import("../input.zig");
 const gamepad = @import("../gamepad.zig");
 const gl = @import("../gl.zig");
 const keys = @import("../keys.zig");
@@ -198,6 +199,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .scrollLines = scrollLines,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -569,6 +571,12 @@ fn enumerateMonitors(
 fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
     _ = .{ impl, native };
     return if (list.len == 0) null else 0;
+}
+
+/// A page is not told the setting; the browser has already applied it to the distance it reports.
+fn scrollLines(impl: backend.Impl) input.ScrollLines {
+    _ = impl;
+    return .{};
 }
 
 /// A `MonitorInfo` as a `Monitor`.

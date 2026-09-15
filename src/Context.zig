@@ -613,6 +613,13 @@ pub fn mods(self: *const Context) keys.Mods {
     return self.state.mods;
 }
 
+/// How many lines - and characters, sideways - the user has the system scroll
+/// text by for one notch of the wheel. `.scroll` events stay in notches, which
+/// is what a zoom wants; a text view multiplies them by this.
+pub fn scrollLines(self: *Context) input.ScrollLines {
+    return self.vtable.scrollLines(self.impl);
+}
+
 /// Keep a press readable until it has been polled once, so a tap that begins
 /// and ends inside one frame is not lost. See `input.State`.
 pub fn setStickyKeys(self: *Context, on: bool) void {
@@ -653,6 +660,18 @@ test "pumping an empty backend yields nothing" {
 
     try ctx.pump();
     try testing.expectEqual(@as(?event.Event, null), ctx.poll());
+}
+
+test "a system with no scroll setting scrolls three lines a notch, and a real one says its own" {
+    var headless = try Context.init(testing.allocator, .{ .select = .{ .only = .none } });
+    defer headless.deinit();
+    try testing.expectEqual(input.ScrollLines{}, headless.scrollLines());
+
+    var ctx = Context.init(testing.allocator, .{}) catch return;
+    defer ctx.deinit();
+    const setting = ctx.scrollLines();
+    try testing.expect(setting.x >= 0 and setting.y >= 0);
+    if (setting.page) try testing.expectEqual(@as(f32, 1), setting.y);
 }
 
 test "a backend this build has not got is refused by name" {

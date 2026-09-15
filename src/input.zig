@@ -24,6 +24,17 @@ const testing = std.testing;
 const event = @import("event.zig");
 const keys = @import("keys.zig");
 
+/// How far the system scrolls text for one notch of the wheel: what a text
+/// view multiplies a `.scroll` event's notches by. See `Context.scrollLines`.
+pub const ScrollLines = struct {
+    /// Characters for a notch of the horizontal wheel.
+    x: f32 = 3,
+    /// Lines for a notch of the vertical wheel.
+    y: f32 = 3,
+    /// The user chose a screen at a time: a vertical notch is a page, and `y` is 1.
+    page: bool = false,
+};
+
 /// Everything the pointer and the keyboard are doing.
 pub const State = struct {
     /// Down now, one entry per key. `Key.index` says where a key sits.

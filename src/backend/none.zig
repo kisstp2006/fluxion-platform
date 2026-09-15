@@ -19,6 +19,7 @@ const testing = std.testing;
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
 const event = @import("../event.zig");
+const input = @import("../input.zig");
 const monitor = @import("../monitor.zig");
 const gamepad = @import("../gamepad.zig");
 const gl = @import("../gl.zig");
@@ -46,6 +47,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .scrollLines = scrollLines,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -160,6 +162,11 @@ fn enumerateMonitors(
 fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
     _ = .{ impl, native, list };
     return null;
+}
+
+fn scrollLines(impl: backend.Impl) input.ScrollLines {
+    _ = impl;
+    return .{};
 }
 
 /// No keyboard, so no text and no input method to compose it with.

@@ -41,6 +41,7 @@ const dyn = @import("fluxion_dyn");
 
 const backend = @import("../backend.zig");
 const event = @import("../event.zig");
+const input_mod = @import("../input.zig");
 const monitor = @import("../monitor.zig");
 const gamepad = @import("../gamepad.zig");
 const android_gamepad = @import("android_gamepad.zig");
@@ -684,6 +685,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .scrollLines = scrollLines,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -1241,6 +1243,12 @@ fn enumerateMonitors(
 fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
     _ = .{ impl, native };
     return if (list.len == 0) null else 0;
+}
+
+/// Android has no such setting: a list scrolls by distance, not by lines.
+fn scrollLines(impl: backend.Impl) input_mod.ScrollLines {
+    _ = impl;
+    return .{};
 }
 
 /// Nothing to do, and nothing to refuse.

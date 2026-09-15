@@ -29,6 +29,8 @@ const dyn = @import("fluxion_dyn");
 
 const backend = @import("../backend.zig");
 const event = @import("../event.zig");
+const input = @import("../input.zig");
+const kdeglobals = @import("kdeglobals.zig");
 const monitor = @import("../monitor.zig");
 const gamepad = @import("../gamepad.zig");
 const linux_gamepad = @import("linux_gamepad.zig");
@@ -961,6 +963,7 @@ pub const vtable: backend.Vtable = .{
     .contentScale = contentScale,
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
+    .scrollLines = scrollLines,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -1757,6 +1760,11 @@ fn intersect(a: monitor.Rect, b: monitor.Rect) monitor.Rect {
         .width = @intCast(right - left),
         .height = @intCast(bottom - top),
     };
+}
+
+fn scrollLines(impl: backend.Impl) input.ScrollLines {
+    _ = impl;
+    return kdeglobals.scrollLines();
 }
 
 /// X11 has no call for it, so it is the monitor showing most of the window.

@@ -126,6 +126,9 @@ pub const Action = keys.Action;
 /// What was held down at the time. See `keys`.
 pub const Mods = keys.Mods;
 
+/// How far the user has the system scroll text for one wheel notch. See `Context.scrollLines`.
+pub const ScrollLines = input.ScrollLines;
+
 /// Where the pointer may go, and whether it can be seen. See `cursor`.
 pub const CursorMode = cursor.Mode;
 
@@ -184,6 +187,7 @@ test {
     _ = fonts;
     _ = shell;
     _ = @import("backend/unix_shell.zig");
+    _ = @import("backend/kdeglobals.zig");
     _ = web;
     _ = @import("window_ops_test.zig");
     _ = @import("cursor_test.zig");

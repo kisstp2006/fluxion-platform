@@ -223,6 +223,13 @@ losing focus lets go of every held key - otherwise alt-tab leaves a camera
 drifting forever - and `setStickyKeys` keeps a press readable until it has
 been polled once, so a tap that begins and ends inside one frame is not lost.
 
+**A wheel turns in notches, and a text view scrolls by the user's setting.**
+`.scroll` counts notches, which is what a zoom wants; `ctx.scrollLines()` is
+how many lines - and characters, sideways - the user has the system scroll
+text by for one. Windows' own setting, `.page` when it is a screen at a time;
+KDE's `WheelScrollLines`; three wherever a system has no such setting, which
+is GNOME, Android and a browser, where the page has had it applied already.
+
 ## A key is not a letter
 
 ```zig

@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const cursor = @import("cursor.zig");
 const dialog = @import("dialog.zig");
 const event = @import("event.zig");
+const input = @import("input.zig");
 const monitor = @import("monitor.zig");
 const gamepad = @import("gamepad.zig");
 const gl_mod = @import("gl.zig");
@@ -201,6 +202,9 @@ pub const Vtable = struct {
 
     /// Use one of the system's own cursor shapes.
     setCursorShape: *const fn (impl: Impl, native: NativeWindow, shape: cursor.Shape) Error!void,
+
+    /// The user's scroll setting, asked for each time so a change is heard at once.
+    scrollLines: *const fn (impl: Impl) input.ScrollLines,
 
     /// Fill `list` with what is attached now, and `modes` with every video mode
     /// any of them has.

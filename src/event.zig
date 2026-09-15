@@ -120,6 +120,8 @@ pub const CursorEvent = struct {
 /// down as positive, Win32 and X11 count up - and each backend turns its own
 /// numbers round, so that a program has one convention to know rather than
 /// one per platform.
+///
+/// A text view scrolls notches times `Context.scrollLines`: the user's own setting.
 pub const ScrollEvent = struct {
     window: WindowId,
     x: f64,
