@@ -32,9 +32,12 @@ pub const Kind = enum(u32) {
     /// A codepoint was typed. `a` is the codepoint, `b` the modifier bits.
     char = 2,
     /// A mouse button changed. `a` is the DOM button number, `b` the action,
-    /// `c` the modifier bits, `x` and `y` where the pointer was.
+    /// `c` the modifier bits, `d` the event's time in whole milliseconds,
+    /// wrapped to 32 bits, `x` and `y` where the pointer was, and `dx` 1 where
+    /// a finger rather than a mouse or a pen did it.
     button = 3,
-    /// The pointer moved. `x` and `y` in CSS pixels, `dx` and `dy` the motion.
+    /// The pointer moved. `x` and `y` in the drawing buffer's pixels, `dx` and
+    /// `dy` the motion.
     cursor = 4,
     /// A wheel turned. `a` is the DOM delta mode, `b` the modifier bits, `x`
     /// and `y` the deltas exactly as the browser reported them.

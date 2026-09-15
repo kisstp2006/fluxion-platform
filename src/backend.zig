@@ -19,6 +19,7 @@ const cursor = @import("cursor.zig");
 const dialog = @import("dialog.zig");
 const event = @import("event.zig");
 const input = @import("input.zig");
+const keys = @import("keys.zig");
 const monitor = @import("monitor.zig");
 const gamepad = @import("gamepad.zig");
 const gl_mod = @import("gl.zig");
@@ -206,6 +207,13 @@ pub const Vtable = struct {
 
     /// The user's scroll setting, asked for each time so a change is heard at once.
     scrollLines: *const fn (impl: Impl) input.ScrollLines,
+
+    /// The longest a double click may take, in milliseconds.
+    doubleClickTime: *const fn (impl: Impl) u32,
+
+    /// How long a text caret shows before it hides, in milliseconds - half of a
+    /// blink. Null where the user turned blinking off.
+    caretBlinkTime: *const fn (impl: Impl) ?u32,
 
     /// Fill `list` with what is attached now, and `modes` with every video mode
     /// any of them has.
@@ -396,6 +404,33 @@ pub const Queue = struct {
     }
 };
 
+/// Two presses of one button, soon enough and near enough, are a double click:
+/// the rule X11, Wayland, Android and a browser leave to the program. Windows
+/// decides for itself.
+pub const Clicks = struct {
+    window: event.WindowId = .none,
+    button: ?keys.MouseButton = null,
+    time_ms: u32 = 0,
+    x: f64 = 0,
+    y: f64 = 0,
+
+    /// Whether this press is the second of a pair. `time_ms` is the system's
+    /// own clock for the event, which wraps.
+    pub fn press(self: *Clicks, window: event.WindowId, button: keys.MouseButton, x: f64, y: f64, time_ms: u32, limit_ms: u32, distance: f64) bool {
+        const double = self.button == button and self.window == window and
+            time_ms -% self.time_ms <= limit_ms and
+            @abs(x - self.x) <= distance and @abs(y - self.y) <= distance;
+        self.* = if (double) .{} else .{ .window = window, .button = button, .time_ms = time_ms, .x = x, .y = y };
+        return double;
+    }
+
+    /// For a rule that times the pair from the first release, as Android's
+    /// double tap does.
+    pub fn release(self: *Clicks, button: keys.MouseButton, time_ms: u32) void {
+        if (self.button == button) self.time_ms = time_ms;
+    }
+};
+
 /// Events a backend made outside a pump, kept for the next one: Windows answers
 /// a program's own `maximize` at once, and a Wayland roundtrip runs listeners.
 /// Not a drop or a dialog's answer, whose paths would not live that long.
@@ -428,6 +463,36 @@ pub const Later = struct {
 // -------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "a second press of one button, soon and near, is a double click, and a third starts again" {
+    var clicks: Clicks = .{};
+    const id: event.WindowId = @enumFromInt(1);
+    try testing.expect(!clicks.press(id, .left, 10, 10, 1000, 400, 5));
+    try testing.expect(clicks.press(id, .left, 13, 12, 1300, 400, 5));
+    try testing.expect(!clicks.press(id, .left, 13, 12, 1400, 400, 5));
+    try testing.expect(clicks.press(id, .left, 13, 12, 1500, 400, 5));
+
+    try testing.expect(!clicks.press(id, .left, 0, 0, 5000, 400, 5));
+    try testing.expect(!clicks.press(id, .left, 0, 0, 5401, 400, 5));
+    try testing.expect(!clicks.press(id, .right, 0, 0, 5500, 400, 5));
+    try testing.expect(!clicks.press(id, .right, 6, 0, 5600, 400, 5));
+    try testing.expect(!clicks.press(@enumFromInt(2), .right, 6, 0, 5700, 400, 5));
+
+    try testing.expect(!clicks.press(id, .left, 0, 0, std.math.maxInt(u32) - 100, 400, 5));
+    try testing.expect(clicks.press(id, .left, 0, 0, 100, 400, 5));
+}
+
+test "a pair timed from the first release allows a slow first press" {
+    var clicks: Clicks = .{};
+    const id: event.WindowId = @enumFromInt(1);
+    try testing.expect(!clicks.press(id, .left, 0, 0, 1000, 300, 100));
+    clicks.release(.left, 1250);
+    try testing.expect(clicks.press(id, .left, 40, 0, 1500, 300, 100));
+    clicks.release(.left, 1600);
+    try testing.expect(!clicks.press(id, .left, 40, 0, 1700, 300, 100));
+    clicks.release(.right, 2500);
+    try testing.expect(!clicks.press(id, .left, 40, 0, 2600, 300, 100));
+}
 
 test "what happened between pumps waits for the next one, paths aside" {
     var later: Later = .{};

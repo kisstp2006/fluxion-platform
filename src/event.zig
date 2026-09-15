@@ -95,6 +95,9 @@ pub const MouseButtonEvent = struct {
     /// Where the cursor was, in content-area coordinates.
     x: f64,
     y: f64,
+    /// The press that makes a double click, or a finger's double tap, by the
+    /// system's own rule where it has one. A third press starts again.
+    double_click: bool = false,
 };
 
 /// The cursor moved, in content-area coordinates with the origin top left.

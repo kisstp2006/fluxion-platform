@@ -238,6 +238,15 @@ text by for one. Windows' own setting, `.page` when it is a screen at a time;
 KDE's `WheelScrollLines`; three wherever a system has no such setting, which
 is GNOME, Android and a browser, where the page has had it applied already.
 
+**A double click is the system's.** A press that makes one says so with
+`double_click`, and a third press starts again. Windows decides by its own
+setting; X11 and Wayland by KDE's `DoubleClickInterval`, or 400 ms, within
+5 logical pixels; a browser by 400 ms too. A finger's double tap is Android's
+rule, on Android and on a page: 300 ms from the first lift, within 100 dp. The
+two times behind a text field are there to ask: `ctx.doubleClickTime()` and
+`ctx.caretBlinkTime()`, how long a caret shows before it hides, null where the
+user turned blinking off.
+
 ## A key is not a letter
 
 ```zig

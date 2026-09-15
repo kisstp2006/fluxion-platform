@@ -141,6 +141,8 @@ const Impl = struct {
     names: std.heap.ArenaAllocator,
     drop: Files = .{},
     chosen: Files = .{},
+
+    clicks: backend.Clicks = .{},
 };
 
 /// A drop or a dialog's answer, put back together from its records: one that
@@ -200,6 +202,8 @@ pub const vtable: backend.Vtable = .{
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
     .scrollLines = scrollLines,
+    .doubleClickTime = doubleClickTime,
+    .caretBlinkTime = caretBlinkTime,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -579,6 +583,32 @@ fn scrollLines(impl: backend.Impl) input.ScrollLines {
     return .{};
 }
 
+/// A page is told neither: Godot's double click, and Windows' default blink.
+fn doubleClickTime(impl: backend.Impl) u32 {
+    _ = impl;
+    return double_click_ms;
+}
+
+fn caretBlinkTime(impl: backend.Impl) ?u32 {
+    _ = impl;
+    return 530;
+}
+
+const double_click_ms: u32 = 400;
+const double_click_px: f64 = 5;
+/// Android's double tap, for a finger on a page, timed from the first lift: a
+/// CSS pixel is near enough a dp.
+const double_tap_ms: u32 = 300;
+const double_tap_px: f64 = 100;
+
+fn doubleClick(self: *Impl, id: event.WindowId, button: keys.MouseButton, record: *const wire.Record) bool {
+    const scale: f64 = if (find(self, id)) |native| native.scale else 1;
+    const finger = record.dx != 0;
+    const limit = if (finger) double_tap_ms else double_click_ms;
+    const distance = (if (finger) double_tap_px else double_click_px) * scale;
+    return self.clicks.press(id, button, record.x, record.y, @bitCast(record.d), limit, distance);
+}
+
 /// A `MonitorInfo` as a `Monitor`.
 pub fn monitorFrom(info: wire.MonitorInfo) monitor.Monitor {
     const scale: f32 = if (info.scale > 0) @floatCast(info.scale) else 1;
@@ -917,14 +947,18 @@ fn translate(self: *Impl, record: *const wire.Record) void {
 
         .button => {
             const action = actionFrom(record.b) orelse return;
+            const button = buttonFrom(record.a);
             // A button does not repeat; a stray one is a press.
+            const pressed = action != .release;
+            if (!pressed and record.dx != 0) self.clicks.release(button, @bitCast(record.d));
             push(self, .{ .mouse_button = .{
                 .window = id,
-                .button = buttonFrom(record.a),
-                .action = if (action == .repeat) .press else action,
+                .button = button,
+                .action = if (pressed) .press else .release,
                 .mods = modsFrom(record.c),
                 .x = record.x,
                 .y = record.y,
+                .double_click = pressed and doubleClick(self, id, button, record),
             } });
         },
 
@@ -1376,6 +1410,29 @@ test "a button, the pointer and the wheel come through in the library's terms" {
             // Down is negative here, as on every other backend.
             try testing.expectApproxEqAbs(@as(f64, -1), queue.next().?.scroll.y, 1e-9);
             try testing.expectApproxEqAbs(@as(f64, -1), queue.next().?.scroll.y, 1e-9);
+        }
+    }.run);
+}
+
+test "a second click soon and near is a double click, and a finger's may land further off" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            _ = native;
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 1, .d = 1000, .x = 10, .y = 10 }, "");
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 0, .d = 1080, .x = 10, .y = 10 }, "");
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 1, .d = 1200, .x = 13, .y = 12 }, "");
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 1, .d = 5000, .x = 10, .y = 10 }, "");
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 1, .d = 5200, .x = 40, .y = 10 }, "");
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 1, .d = 9000, .x = 10, .y = 10, .dx = 1 }, "");
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 0, .d = 9200, .x = 10, .y = 10, .dx = 1 }, "");
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 1, .d = 9450, .x = 60, .y = 30, .dx = 1 }, "");
+            try vtable.pump(impl, queue);
+
+            const expected = [_]bool{ false, false, true, false, false, false, false, true };
+            for (expected) |double| {
+                try testing.expectEqual(double, queue.next().?.mouse_button.double_click);
+            }
+            try testing.expectEqual(@as(?event.Event, null), queue.next());
         }
     }.run);
 }

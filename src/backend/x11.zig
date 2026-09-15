@@ -832,6 +832,10 @@ const Impl = struct {
     net_workarea: Atom,
     wm_state: Atom,
     scale: f32,
+    /// Read once, at open, so that no click waits on a file.
+    double_click_ms: u32,
+    caret_blink_ms: ?u32,
+    clicks: backend.Clicks = .{},
     /// Null where RandR is missing, and then there is one monitor the size of
     /// the screen. Which is not a lie: without RandR that is all there is.
     xrandr: ?dyn.Library = null,
@@ -964,6 +968,8 @@ pub const vtable: backend.Vtable = .{
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
     .scrollLines = scrollLines,
+    .doubleClickTime = doubleClickTime,
+    .caretBlinkTime = caretBlinkTime,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -1036,6 +1042,8 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .net_workarea = x.XInternAtom(display, "_NET_WORKAREA", 0),
         .wm_state = x.XInternAtom(display, "WM_STATE", 0),
         .scale = readScale(x, display),
+        .double_click_ms = kdeglobals.doubleClickTime(),
+        .caret_blink_ms = kdeglobals.caretBlinkTime(),
         .answers = .init(gpa),
     };
 
@@ -1767,6 +1775,17 @@ fn scrollLines(impl: backend.Impl) input.ScrollLines {
     return kdeglobals.scrollLines();
 }
 
+fn doubleClickTime(impl: backend.Impl) u32 {
+    return cast(impl).double_click_ms;
+}
+
+fn caretBlinkTime(impl: backend.Impl) ?u32 {
+    return cast(impl).caret_blink_ms;
+}
+
+/// GTK's and Qt's default: how far a second click may land from the first.
+const double_click_px: f64 = 5;
+
 /// X11 has no call for it, so it is the monitor showing most of the window.
 fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
     const win = castWindow(native);
@@ -2463,13 +2482,17 @@ fn translate(self: *Impl, ev: *XEvent, queue: *backend.Queue) Error!void {
                 9 => .button_5,
                 else => @enumFromInt(@as(u8, @intCast(@min(b, 255)))),
             };
+            const x: f64 = @floatFromInt(ev.xbutton.x);
+            const y: f64 = @floatFromInt(ev.xbutton.y);
+            const distance = double_click_px * self.scale;
             try queue.push(.{ .mouse_button = .{
                 .window = id,
                 .button = button,
                 .action = if (down) .press else .release,
                 .mods = modsFromState(ev.xbutton.state),
-                .x = @floatFromInt(ev.xbutton.x),
-                .y = @floatFromInt(ev.xbutton.y),
+                .x = x,
+                .y = y,
+                .double_click = down and self.clicks.press(id, button, x, y, @truncate(ev.xbutton.time), self.double_click_ms, distance),
             } });
         },
 
@@ -3270,6 +3293,57 @@ test "a key sent to the window comes back out as text" {
     const typed = saw_char orelse return error.TestUnexpectedResult;
     try testing.expect(typed >= 0x20);
     try testing.expect(typed != 0x7F);
+}
+
+test "a second click soon and near is a double click, by the server's clock" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    const native = try vtable.createWindow(impl, testing.allocator, @enumFromInt(9), .{
+        .title = "fluxion-platform click test",
+        .width = 320,
+        .height = 240,
+        .resizable = true,
+        .decorated = true,
+        .visible = false,
+        .maximized = false,
+        .gl = null,
+    });
+    defer vtable.destroyWindow(impl, testing.allocator, native);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+
+    const late: Time = 1300 + self.double_click_ms + 1;
+    const presses = [_]struct { time: Time, x: c_int, double: bool }{
+        .{ .time = 1000, .x = 10, .double = false },
+        .{ .time = 1200, .x = 12, .double = true },
+        .{ .time = 1300, .x = 12, .double = false },
+        .{ .time = late, .x = 12, .double = false },
+        .{ .time = late + 100, .x = 40, .double = false },
+    };
+    for (presses) |press| {
+        var ev: XEvent = std.mem.zeroes(XEvent);
+        ev.xbutton = .{
+            .type = button_press,
+            .serial = 0,
+            .send_event = 0,
+            .display = self.display,
+            .window = castWindow(native).window,
+            .root = self.root,
+            .subwindow = 0,
+            .time = press.time,
+            .x = press.x,
+            .y = 10,
+            .x_root = 0,
+            .y_root = 0,
+            .state = 0,
+            .button = 1,
+            .same_screen = 1,
+        };
+        queue.clear();
+        try translate(self, &ev, &queue);
+        try testing.expectEqual(press.double, queue.next().?.mouse_button.double_click);
+    }
 }
 
 test "a client message sent to the window comes back out as an event" {

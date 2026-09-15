@@ -184,6 +184,7 @@ const CreateStructW = extern struct {
 const cs_hredraw: u32 = 0x0002;
 const cs_vredraw: u32 = 0x0001;
 const cs_owndc: u32 = 0x0020;
+const cs_dblclks: u32 = 0x0008;
 
 const ws_overlapped: u32 = 0x00000000;
 const ws_caption: u32 = 0x00C00000;
@@ -349,13 +350,17 @@ const wm_move: u32 = 0x0003;
 const wm_mousemove: u32 = 0x0200;
 const wm_lbuttondown: u32 = 0x0201;
 const wm_lbuttonup: u32 = 0x0202;
+const wm_lbuttondblclk: u32 = 0x0203;
 const wm_rbuttondown: u32 = 0x0204;
 const wm_rbuttonup: u32 = 0x0205;
+const wm_rbuttondblclk: u32 = 0x0206;
 const wm_mbuttondown: u32 = 0x0207;
 const wm_mbuttonup: u32 = 0x0208;
+const wm_mbuttondblclk: u32 = 0x0209;
 const wm_mousewheel: u32 = 0x020A;
 const wm_xbuttondown: u32 = 0x020B;
 const wm_xbuttonup: u32 = 0x020C;
+const wm_xbuttondblclk: u32 = 0x020D;
 const wm_mousehwheel: u32 = 0x020E;
 const wm_dpichanged: u32 = 0x02E0;
 const wm_dropfiles: u32 = 0x0233;
@@ -441,6 +446,8 @@ const User32 = struct {
     GetKeyState: *const fn (i32) callconv(.winapi) i16,
     GetMessageTime: *const fn () callconv(.winapi) i32,
     SystemParametersInfoW: *const fn (u32, u32, ?*anyopaque, u32) callconv(.winapi) i32,
+    GetDoubleClickTime: *const fn () callconv(.winapi) u32,
+    GetCaretBlinkTime: *const fn () callconv(.winapi) u32,
     /// A virtual key into a scan code, for a keystroke that arrived without
     /// one. See `scancodeFrom`.
     MapVirtualKeyW: *const fn (u32, u32) callconv(.winapi) u32,
@@ -723,6 +730,8 @@ pub const vtable: backend.Vtable = .{
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
     .scrollLines = scrollLines,
+    .doubleClickTime = doubleClickTime,
+    .caretBlinkTime = caretBlinkTime,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -776,7 +785,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
 
     const class: WndClassExW = .{
         .size = @sizeOf(WndClassExW),
-        .style = cs_hredraw | cs_vredraw | cs_owndc,
+        .style = cs_hredraw | cs_vredraw | cs_owndc | cs_dblclks,
         .wnd_proc = windowProc,
         .cls_extra = 0,
         .wnd_extra = 0,
@@ -1738,6 +1747,22 @@ fn scrollLines(impl: backend.Impl) input.ScrollLines {
     return .{ .x = @floatFromInt(chars), .y = @floatFromInt(lines) };
 }
 
+fn doubleClickTime(impl: backend.Impl) u32 {
+    return cast(impl).u.GetDoubleClickTime();
+}
+
+/// `INFINITE`: the user turned blinking off.
+const caret_never_blinks: u32 = 0xFFFFFFFF;
+
+fn caretBlinkTime(impl: backend.Impl) ?u32 {
+    return switch (cast(impl).u.GetCaretBlinkTime()) {
+        caret_never_blinks => null,
+        // A failure, not a caret that never shows: Windows' own default.
+        0 => 530,
+        else => |time| time,
+    };
+}
+
 /// Matched by corner, because a mode change leaves the list's sizes stale.
 fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
     const self = cast(impl);
@@ -2447,24 +2472,32 @@ fn handle(
 
         wm_lbuttondown,
         wm_lbuttonup,
+        wm_lbuttondblclk,
         wm_rbuttondown,
         wm_rbuttonup,
+        wm_rbuttondblclk,
         wm_mbuttondown,
         wm_mbuttonup,
+        wm_mbuttondblclk,
         wm_xbuttondown,
         wm_xbuttonup,
+        wm_xbuttondblclk,
         => {
             const button: keys.MouseButton = switch (message) {
-                wm_lbuttondown, wm_lbuttonup => .left,
-                wm_rbuttondown, wm_rbuttonup => .right,
-                wm_mbuttondown, wm_mbuttonup => .middle,
+                wm_lbuttondown, wm_lbuttonup, wm_lbuttondblclk => .left,
+                wm_rbuttondown, wm_rbuttonup, wm_rbuttondblclk => .right,
+                wm_mbuttondown, wm_mbuttonup, wm_mbuttondblclk => .middle,
                 // The high word says which of the two extra buttons it was.
                 else => if ((wparam >> 16) & 0xFFFF == 1)
                     keys.MouseButton.button_4
                 else
                     keys.MouseButton.button_5,
             };
-            const down = switch (message) {
+            const double = switch (message) {
+                wm_lbuttondblclk, wm_rbuttondblclk, wm_mbuttondblclk, wm_xbuttondblclk => true,
+                else => false,
+            };
+            const down = double or switch (message) {
                 wm_lbuttondown, wm_rbuttondown, wm_mbuttondown, wm_xbuttondown => true,
                 else => false,
             };
@@ -2476,9 +2509,13 @@ fn handle(
                 .mods = readMods(self),
                 .x = @floatFromInt(@as(i16, @truncate(lparam & 0xFFFF))),
                 .y = @floatFromInt(@as(i16, @truncate((lparam >> 16) & 0xFFFF))),
+                .double_click = double,
             } });
             // The X buttons want a non-zero return to say they were handled.
-            return if (message == wm_xbuttondown or message == wm_xbuttonup) 1 else 0;
+            return switch (message) {
+                wm_xbuttondown, wm_xbuttonup, wm_xbuttondblclk => 1,
+                else => 0,
+            };
         },
 
         wm_mousewheel, wm_mousehwheel => {
@@ -3240,6 +3277,35 @@ test "a confining mode holds the pointer only while the window has focus" {
     try vtable.setCursorMode(impl, win, .normal);
     try testing.expect(!win.held);
 }
+
+test "Windows' own double click is a press that says so, an extra button's too" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const win = try hiddenWindow(impl, @enumFromInt(9));
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    try vtable.pump(impl, &queue);
+
+    const at: LPARAM = 12 | (34 << 16);
+    try postAndPump(impl, &queue, win, wm_lbuttondown, 0, at);
+    try testing.expect(!queue.next().?.mouse_button.double_click);
+
+    try postAndPump(impl, &queue, win, wm_lbuttondblclk, 0, at);
+    const double = queue.next().?.mouse_button;
+    try testing.expect(double.double_click);
+    try testing.expectEqual(keys.MouseButton.left, double.button);
+    try testing.expectEqual(keys.Action.press, double.action);
+    try testing.expectEqual(@as(f64, 34), double.y);
+
+    try postAndPump(impl, &queue, win, wm_xbuttondblclk, 2 << 16, at);
+    const extra = queue.next().?.mouse_button;
+    try testing.expect(extra.double_click);
+    try testing.expectEqual(keys.MouseButton.button_5, extra.button);
+
+    try testing.expect(vtable.doubleClickTime(impl) > 0);
+}
+
 fn keyLparam(scancode: u32, extended: bool, up: bool) LPARAM {
     var bits: usize = 1 | (@as(usize, scancode) << 16);
     if (extended) bits |= 1 << 24;

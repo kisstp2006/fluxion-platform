@@ -48,6 +48,8 @@ pub const vtable: backend.Vtable = .{
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
     .scrollLines = scrollLines,
+    .doubleClickTime = doubleClickTime,
+    .caretBlinkTime = caretBlinkTime,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -167,6 +169,16 @@ fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const
 fn scrollLines(impl: backend.Impl) input.ScrollLines {
     _ = impl;
     return .{};
+}
+
+fn doubleClickTime(impl: backend.Impl) u32 {
+    _ = impl;
+    return 400;
+}
+
+fn caretBlinkTime(impl: backend.Impl) ?u32 {
+    _ = impl;
+    return 530;
 }
 
 /// No keyboard, so no text and no input method to compose it with.

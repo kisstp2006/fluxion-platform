@@ -341,6 +341,7 @@ const seat_keyboard: u32 = 2;
 
 /// `wl_keyboard.key_state` and `wl_pointer.button_state`.
 const state_released: u32 = 0;
+const state_pressed: u32 = 1;
 
 /// `wl_pointer.axis`.
 const axis_vertical: u32 = 0;
@@ -684,6 +685,10 @@ const Impl = struct {
     pointer_focus: ?*Native = null,
     keyboard_focus: ?*Native = null,
     mods: keys.Mods = .none,
+    /// Read once, at open, so that no click waits on a file.
+    double_click_ms: u32,
+    caret_blink_ms: ?u32,
+    clicks: backend.Clicks = .{},
 
     /// Set for the length of one `pump`, so a listener called from inside
     /// `wl_display_dispatch_pending` has somewhere to put what it produced.
@@ -886,6 +891,8 @@ pub const vtable: backend.Vtable = .{
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
     .scrollLines = scrollLines,
+    .doubleClickTime = doubleClickTime,
+    .caretBlinkTime = caretBlinkTime,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -989,6 +996,8 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .w = w,
         .core = core,
         .display = display,
+        .double_click_ms = kdeglobals.doubleClickTime(),
+        .caret_blink_ms = kdeglobals.caretBlinkTime(),
         .answers = .init(gpa),
     };
 
@@ -1936,25 +1945,28 @@ fn onPointerButton(
     button: u32,
     state: u32,
 ) callconv(.c) void {
-    _ = .{ proxy, time };
+    _ = proxy;
     const self: *Impl = @ptrCast(@alignCast(data.?));
     self.input_serial = serial;
     const native = self.pointer_focus orelse return;
 
+    const which: keys.MouseButton = switch (button) {
+        btn_left => .left,
+        btn_right => .right,
+        btn_middle => .middle,
+        btn_side => .button_4,
+        btn_extra => .button_5,
+        else => .left,
+    };
+    const down = state != state_released;
     push(self, .{ .mouse_button = .{
         .window = native.id,
-        .button = switch (button) {
-            btn_left => .left,
-            btn_right => .right,
-            btn_middle => .middle,
-            btn_side => .button_4,
-            btn_extra => .button_5,
-            else => .left,
-        },
-        .action = if (state == state_released) .release else .press,
+        .button = which,
+        .action = if (down) .press else .release,
         .mods = self.mods,
         .x = native.last_x,
         .y = native.last_y,
+        .double_click = down and self.clicks.press(native.id, which, native.last_x, native.last_y, time, self.double_click_ms, double_click_px),
     } });
 }
 
@@ -2349,6 +2361,17 @@ fn scrollLines(impl: backend.Impl) input.ScrollLines {
     _ = impl;
     return kdeglobals.scrollLines();
 }
+
+fn doubleClickTime(impl: backend.Impl) u32 {
+    return cast(impl).double_click_ms;
+}
+
+fn caretBlinkTime(impl: backend.Impl) ?u32 {
+    return cast(impl).caret_blink_ms;
+}
+
+/// GTK's and Qt's default, in surface pixels: the compositor scales those.
+const double_click_px: f64 = 5;
 
 /// The output the surface entered last, found in the list by where it is.
 fn windowMonitor(impl: backend.Impl, native: backend.NativeWindow, list: []const monitor.Monitor) ?usize {
@@ -3486,6 +3509,36 @@ test "the compositor maximising and restoring the window comes out as events" {
     var none: WlArray = .{ .size = 0, .alloc = 0, .data = null };
     onToplevelConfigure(&self, toplevel, 0, 0, &none);
     try testing.expectEqual(event.Event{ .maximize = .{ .window = native.id, .value = false } }, queue.next().?);
+    try testing.expectEqual(@as(?event.Event, null), queue.next());
+}
+
+test "a second click soon and near is a double click, by the compositor's clock" {
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    var self: Impl = undefined;
+    self.queue = &queue;
+    self.push_failed = false;
+    self.mods = .none;
+    self.clicks = .{};
+    self.double_click_ms = 400;
+    var native = fakeNative(&self, @ptrFromInt(0x3000));
+    native.last_x = 10;
+    native.last_y = 10;
+    self.pointer_focus = &native;
+    const pointer: *Proxy = @ptrFromInt(0x10);
+
+    onPointerButton(&self, pointer, 1, 1000, btn_left, state_pressed);
+    onPointerButton(&self, pointer, 2, 1100, btn_left, state_released);
+    native.last_x = 13;
+    onPointerButton(&self, pointer, 3, 1200, btn_left, state_pressed);
+    onPointerButton(&self, pointer, 4, 1300, btn_left, state_pressed);
+    onPointerButton(&self, pointer, 5, 1400, btn_right, state_pressed);
+    onPointerButton(&self, pointer, 6, 1900, btn_right, state_pressed);
+
+    const expected = [_]bool{ false, false, true, false, false, false };
+    for (expected) |double| {
+        try testing.expectEqual(double, queue.next().?.mouse_button.double_click);
+    }
     try testing.expectEqual(@as(?event.Event, null), queue.next());
 }
 

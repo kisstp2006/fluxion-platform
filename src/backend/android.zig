@@ -212,6 +212,8 @@ const Android = struct {
     AMotionEvent_getX: *const fn (*const AInputEvent, usize) callconv(.c) f32,
     AMotionEvent_getY: *const fn (*const AInputEvent, usize) callconv(.c) f32,
     AMotionEvent_getPointerCount: *const fn (*const AInputEvent) callconv(.c) usize,
+    /// Nanoseconds of `SystemClock.uptimeMillis`'s clock.
+    AMotionEvent_getEventTime: *const fn (*const AInputEvent) callconv(.c) i64,
     /// Which device sent it and what kind of thing that device is, so a
     /// controller's events can be told from a touchscreen's.
     AInputEvent_getDeviceId: *const fn (*const AInputEvent) callconv(.c) i32,
@@ -623,12 +625,13 @@ const Impl = struct {
     native: ?*Native = null,
     queue: ?*backend.Queue = null,
     push_failed: bool = false,
+    clicks: backend.Clicks = .{},
 
-    /// Controllers, filled in from the input queue rather than enumerated -
-    /// see `android_gamepad` for why there is no list to ask for.
     /// OpenGL ES, through EGL. The only kind of GL an Android driver has.
     gl: egl.Backend = .{},
 
+    /// Controllers, filled in from the input queue rather than enumerated -
+    /// see `android_gamepad` for why there is no list to ask for.
     pads: android_gamepad.Backend = .{},
 
     /// What a key types, which only the VM knows - see `android_text`.
@@ -686,6 +689,8 @@ pub const vtable: backend.Vtable = .{
     .nativeHandle = nativeHandle,
     .enumerateMonitors = enumerateMonitors,
     .scrollLines = scrollLines,
+    .doubleClickTime = doubleClickTime,
+    .caretBlinkTime = caretBlinkTime,
     .windowMonitor = windowMonitor,
     .pollGamepads = pollGamepads,
     .makeContextCurrent = makeContextCurrent,
@@ -1251,6 +1256,28 @@ fn scrollLines(impl: backend.Impl) input_mod.ScrollLines {
     return .{};
 }
 
+/// `ViewConfiguration`'s double tap timeout, from the first lift to the second
+/// touch.
+const double_tap_ms: u32 = 300;
+/// And its double tap slop, in density-independent pixels.
+const double_tap_dp: f32 = 100;
+
+fn doubleClickTime(impl: backend.Impl) u32 {
+    _ = impl;
+    return double_tap_ms;
+}
+
+fn doubleTap(self: *Impl, id: event.WindowId, x: f64, y: f64, time_ms: u32) bool {
+    const slop: f64 = double_tap_dp * (readDensity(self) orelse 1);
+    return self.clicks.press(id, .left, x, y, time_ms, double_tap_ms, slop);
+}
+
+/// `TextView`'s own blink.
+fn caretBlinkTime(impl: backend.Impl) ?u32 {
+    _ = impl;
+    return 500;
+}
+
 /// Nothing to do, and nothing to refuse.
 ///
 /// An Android window is already the whole screen, so being fullscreen is not a
@@ -1590,9 +1617,14 @@ fn translate(self: *Impl, input_event: *AInputEvent, id: event.WindowId) bool {
 
             const x: f64 = a.AMotionEvent_getX(input_event, 0);
             const y: f64 = a.AMotionEvent_getY(input_event, 0);
+            const nanoseconds: u64 = @bitCast(a.AMotionEvent_getEventTime(input_event));
+            const time_ms: u32 = @truncate(nanoseconds / std.time.ns_per_ms);
 
             switch (action) {
                 motion_action_down, motion_action_pointer_down => {
+                    // A second finger is no double tap, and ends any that was coming.
+                    const first = action == motion_action_down;
+                    if (!first) self.clicks = .{};
                     // A touch is reported as the left button, so a program
                     // written for a mouse works without knowing where it is.
                     push(self, .{ .cursor = .{ .window = id, .x = x, .y = y, .dx = 0, .dy = 0 } });
@@ -1603,9 +1635,12 @@ fn translate(self: *Impl, input_event: *AInputEvent, id: event.WindowId) bool {
                         .mods = .none,
                         .x = x,
                         .y = y,
+                        .double_click = first and doubleTap(self, id, x, y, time_ms),
                     } });
                 },
                 motion_action_up, motion_action_pointer_up, motion_action_cancel => {
+                    if (action == motion_action_up) self.clicks.release(.left, time_ms);
+                    if (action == motion_action_cancel) self.clicks = .{};
                     push(self, .{ .mouse_button = .{
                         .window = id,
                         .button = .left,

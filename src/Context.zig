@@ -620,6 +620,19 @@ pub fn scrollLines(self: *Context) input.ScrollLines {
     return self.vtable.scrollLines(self.impl);
 }
 
+/// The longest the user has two presses be apart and still be a double click,
+/// in milliseconds - on Android a double tap's, from the first lift.
+/// `.mouse_button`'s `double_click` already follows it.
+pub fn doubleClickTime(self: *Context) u32 {
+    return self.vtable.doubleClickTime(self.impl);
+}
+
+/// How long a text caret shows before it hides, in milliseconds - half of a
+/// blink - or null where the user has turned blinking off.
+pub fn caretBlinkTime(self: *Context) ?u32 {
+    return self.vtable.caretBlinkTime(self.impl);
+}
+
 /// Keep a press readable until it has been polled once, so a tap that begins
 /// and ends inside one frame is not lost. See `input.State`.
 pub fn setStickyKeys(self: *Context, on: bool) void {
@@ -672,6 +685,18 @@ test "a system with no scroll setting scrolls three lines a notch, and a real on
     const setting = ctx.scrollLines();
     try testing.expect(setting.x >= 0 and setting.y >= 0);
     if (setting.page) try testing.expectEqual(@as(f32, 1), setting.y);
+}
+
+test "a system says how long a double click and a caret's blink take, and no system says the usual" {
+    var headless = try Context.init(testing.allocator, .{ .select = .{ .only = .none } });
+    defer headless.deinit();
+    try testing.expectEqual(@as(u32, 400), headless.doubleClickTime());
+    try testing.expectEqual(@as(?u32, 530), headless.caretBlinkTime());
+
+    var ctx = Context.init(testing.allocator, .{}) catch return;
+    defer ctx.deinit();
+    try testing.expect(ctx.doubleClickTime() > 0);
+    if (ctx.caretBlinkTime()) |shown| try testing.expect(shown > 0);
 }
 
 test "a backend this build has not got is refused by name" {

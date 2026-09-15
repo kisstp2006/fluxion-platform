@@ -1359,7 +1359,7 @@ export class Platform {
     canvas.addEventListener("pointerdown", (event) => this.pointerDown(win, event), options);
     canvas.addEventListener("pointermove", (event) => this.pointerMove(win, event), options);
     canvas.addEventListener("pointerup", (event) => this.pointerUp(win, event), options);
-    canvas.addEventListener("pointercancel", () => this.buttonsTo(win, 0, 0), options);
+    canvas.addEventListener("pointercancel", (event) => this.buttonsTo(win, 0, 0, event), options);
     canvas.addEventListener(
       "pointerenter",
       (event) => {
@@ -1522,14 +1522,14 @@ export class Platform {
     }
     // A finger has no position until it lands, so it moves there first.
     this.moved(win, event, event.pointerType === "touch");
-    this.buttonsTo(win, event.buttons, modsOf(event));
+    this.buttonsTo(win, event.buttons, modsOf(event), event);
   }
 
   pointerMove(win, event) {
     if (event.pointerType === "touch" && !event.isPrimary) return;
     this.moved(win, event, true);
     // A second button pressed during a drag arrives as a move, not a down.
-    if (event.buttons !== win.buttons) this.buttonsTo(win, event.buttons, modsOf(event));
+    if (event.buttons !== win.buttons) this.buttonsTo(win, event.buttons, modsOf(event), event);
   }
 
   pointerUp(win, event) {
@@ -1544,7 +1544,7 @@ export class Platform {
       }
     }
     this.moved(win, event, false);
-    this.buttonsTo(win, event.buttons, modsOf(event));
+    this.buttonsTo(win, event.buttons, modsOf(event), event);
   }
 
   moved(win, event, report) {
@@ -1575,16 +1575,18 @@ export class Platform {
   }
 
   /// Report whichever buttons changed since the last pointer event.
-  buttonsTo(win, buttons, mods) {
+  buttonsTo(win, buttons, mods, event) {
     const changed = (buttons ?? 0) ^ win.buttons;
     if (changed === 0) return;
     const locked = document.pointerLockElement === win.canvas;
     const x = locked ? 0 : win.lastX;
     const y = locked ? 0 : win.lastY;
+    const d = Math.round(event.timeStamp) | 0;
+    const dx = event.pointerType === "touch" ? 1 : 0;
     for (const [bit, number] of BUTTON_BITS) {
       if ((changed & bit) === 0) continue;
       const down = (buttons & bit) !== 0;
-      this.queue({ kind: KIND.button, win: win.id, a: number, b: down ? 1 : 0, c: mods, x, y });
+      this.queue({ kind: KIND.button, win: win.id, a: number, b: down ? 1 : 0, c: mods, d, x, y, dx });
     }
     win.buttons = buttons ?? 0;
   }
