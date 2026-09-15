@@ -149,6 +149,9 @@ const Files = struct {
     id: event.DialogId = .none,
     names: std.ArrayListUnmanaged([]const u8) = .empty,
     expected: usize = 0,
+    /// Where a drop was let go, in the canvas's coordinates.
+    x: f64 = 0,
+    y: f64 = 0,
 
     fn begin(window: event.WindowId, id: event.DialogId, count: i32) Files {
         return .{ .window = window, .id = id, .expected = @intCast(@max(0, count)) };
@@ -939,11 +942,20 @@ fn translate(self: *Impl, record: *const wire.Record) void {
             push(self, .{ .preedit = id });
         },
 
-        .drop_begin => self.drop = .begin(id, .none, record.a),
+        .drop_begin => {
+            self.drop = .begin(id, .none, record.a);
+            self.drop.x = record.x;
+            self.drop.y = record.y;
+        },
 
         .drop_file => {
             const last = self.drop.add(self.names.allocator(), text) catch return pushFailed(self);
-            if (last) push(self, .{ .drop = .{ .window = self.drop.window, .paths = self.drop.names.items } });
+            if (last) push(self, .{ .drop = .{
+                .window = self.drop.window,
+                .paths = self.drop.names.items,
+                .x = self.drop.x,
+                .y = self.drop.y,
+            } });
         },
 
         .dialog_begin => {
@@ -1405,11 +1417,11 @@ test "a composition is a state, and ending it empties it" {
     }.run);
 }
 
-test "a drop is one event with every name in it, valid until the next pump" {
+test "a drop is one event with every name in it and where it was let go, valid until the next pump" {
     try withWindow(plainWindow(), struct {
         fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
             _ = native;
-            stub.queue(.{ .kind = .drop_begin, .window = 1, .a = 2 }, "");
+            stub.queue(.{ .kind = .drop_begin, .window = 1, .a = 2, .x = 120, .y = 45.5 }, "");
             stub.queue(.{ .kind = .drop_file, .window = 1, .a = 0 }, "level.json");
             stub.queue(.{ .kind = .drop_file, .window = 1, .a = 1 }, "atlas.png");
             try vtable.pump(impl, queue);
@@ -1418,6 +1430,8 @@ test "a drop is one event with every name in it, valid until the next pump" {
             try testing.expectEqual(@as(usize, 2), dropped.paths.len);
             try testing.expectEqualStrings("level.json", dropped.paths[0]);
             try testing.expectEqualStrings("atlas.png", dropped.paths[1]);
+            try testing.expectEqual(@as(f64, 120), dropped.x);
+            try testing.expectEqual(@as(f64, 45.5), dropped.y);
             try testing.expectEqual(@as(?event.Event, null), queue.next());
         }
     }.run);

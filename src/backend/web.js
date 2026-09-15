@@ -1597,7 +1597,9 @@ export class Platform {
       ),
     );
     this.dropped = files.map((file, index) => ({ name: file.name, bytes: bytes[index] }));
-    this.queue({ kind: KIND.dropBegin, win: win.id, a: files.length });
+    // Where it was let go, the way a pointer's place is said.
+    const [x, y] = this.local(win, event);
+    this.queue({ kind: KIND.dropBegin, win: win.id, a: files.length, x, y });
     files.forEach((file, index) => this.queue({ kind: KIND.dropFile, win: win.id, a: index, text: file.name }));
   }
 

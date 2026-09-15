@@ -76,6 +76,8 @@ pub const gl = @import("gl.zig");
 pub const vulkan = @import("vulkan.zig");
 pub const text = @import("text.zig");
 pub const dialog = @import("dialog.zig");
+/// A file or a folder moved to the system's trash. See `trash`.
+pub const trash = @import("trash.zig");
 /// The console and the panic handler a browser build needs. See `web`.
 pub const web = @import("web.zig");
 
@@ -171,6 +173,7 @@ test {
     _ = vulkan;
     _ = text;
     _ = dialog;
+    _ = trash;
     _ = web;
     _ = @import("window_ops_test.zig");
     _ = @import("cursor_test.zig");

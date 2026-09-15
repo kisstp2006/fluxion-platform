@@ -340,6 +340,7 @@ const wm_xbuttondown: u32 = 0x020B;
 const wm_xbuttonup: u32 = 0x020C;
 const wm_mousehwheel: u32 = 0x020E;
 const wm_dpichanged: u32 = 0x02E0;
+const wm_dropfiles: u32 = 0x0233;
 const wm_null: u32 = 0x0000;
 const wm_ime_startcomposition: u32 = 0x010D;
 const wm_ime_endcomposition: u32 = 0x010E;
@@ -542,6 +543,20 @@ const Imm32 = struct {
     ImmAssociateContextEx: *const fn (HWND, ?*anyopaque, u32) callconv(.winapi) i32,
 };
 
+/// Files dropped on a window from the file manager: a window says it takes
+/// them, and each drop arrives as a `WM_DROPFILES` whose handle holds the
+/// paths and the point. In `shell32.dll`, which every Windows has; optional
+/// all the same, like the rest - without it a window takes no drops.
+const Drops = struct {
+    DragAcceptFiles: *const fn (HWND, i32) callconv(.winapi) void,
+    DragQueryFileW: *const fn (?*anyopaque, u32, ?[*]u16, u32) callconv(.winapi) u32,
+    DragQueryPoint: *const fn (?*anyopaque, *Point) callconv(.winapi) i32,
+    DragFinish: *const fn (?*anyopaque) callconv(.winapi) void,
+};
+
+/// `DragQueryFileW`'s index for "how many files".
+const drop_count: u32 = 0xFFFFFFFF;
+
 /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`, which is the handle -4 rather
 /// than a pointer to anything.
 const dpi_per_monitor_v2: isize = -4;
@@ -578,6 +593,8 @@ const Impl = struct {
     g: ?Gdi32 = null,
     shcore: ?dyn.Library = null,
     sh: ?Shcore = null,
+    shell32: ?dyn.Library = null,
+    drops: ?Drops = null,
     /// Where a window procedure puts what it produced. Set for the length of
     /// one `pump` and null the rest of the time, because a message that arrives
     /// outside a pump - Windows sends a few during `CreateWindowExW` - has
@@ -594,7 +611,8 @@ const Impl = struct {
     shell: ?win32_dialog.Shell = null,
     /// The file dialog that is open, whose thread's end `pump` looks for.
     dialog: ?*win32_dialog.Dialog = null,
-    /// What the last dialog's answer carried, kept until the next pump.
+    /// What the last dialog's answer and the last drop carried, kept until
+    /// the next pump.
     answers: std.heap.ArenaAllocator,
 };
 
@@ -752,6 +770,13 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         shcore = null;
     }
 
+    var shell32: ?dyn.Library = dyn.openSystem("shell32.dll") catch null;
+    const drops: ?Drops = if (shell32) |*lib| (lib.bind(Drops) catch null) else null;
+    if (drops == null) {
+        if (shell32) |*lib| lib.close();
+        shell32 = null;
+    }
+
     self.* = .{
         .gpa = gpa,
         .pads = xinput.Backend.open(),
@@ -764,6 +789,8 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .imm = imm,
         .shcore = shcore,
         .sh = sh,
+        .shell32 = shell32,
+        .drops = drops,
         .u = u,
         .k = k,
         .instance = instance,
@@ -786,6 +813,7 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     if (self.imm32) |*lib| lib.close();
     if (self.gdi32) |*lib| lib.close();
     if (self.shcore) |*lib| lib.close();
+    if (self.shell32) |*lib| lib.close();
     self.user32.close();
     self.kernel32.close();
     gpa.destroy(self);
@@ -884,6 +912,7 @@ fn createWindow(
     // where that message reached the procedure. Setting it again is harmless
     // and covers the case where it did not.
     setUserData(self, hwnd, native);
+    if (self.drops) |calls| calls.DragAcceptFiles(hwnd, 1);
 
     if (desc.gl) |config| {
         errdefer _ = self.u.DestroyWindow(hwnd);
@@ -2062,6 +2091,11 @@ fn handle(
             return null;
         },
 
+        wm_dropfiles => {
+            dropFiles(self, id, @ptrFromInt(wparam));
+            return 0;
+        },
+
         wm_setfocus => {
             push(self, .{ .focus = .{ .window = id, .value = true } });
             return 0;
@@ -2322,6 +2356,46 @@ fn handle(
 
         else => return null,
     }
+}
+
+/// Files let go over a window: one event with every path, as UTF-8 - WTF-8,
+/// for a name Windows allows and Unicode does not - and the point they were
+/// let go at. The paths live in `answers`, which lasts until the next pump.
+/// The handle is Windows' to free, and is freed however far this gets.
+fn dropFiles(self: *Impl, id: event.WindowId, drop: ?*anyopaque) void {
+    const calls = self.drops orelse return;
+    defer calls.DragFinish(drop);
+    const arena = self.answers.allocator();
+    const count = calls.DragQueryFileW(drop, drop_count, null, 0);
+    const paths = arena.alloc([]const u8, count) catch {
+        self.push_failed = true;
+        return;
+    };
+    var kept: usize = 0;
+    for (0..count) |i| {
+        const index: u32 = @intCast(i);
+        const len = calls.DragQueryFileW(drop, index, null, 0);
+        if (len == 0) continue;
+        const wide = arena.alloc(u16, len + 1) catch {
+            self.push_failed = true;
+            return;
+        };
+        const got = calls.DragQueryFileW(drop, index, wide.ptr, len + 1);
+        paths[kept] = std.unicode.wtf16LeToWtf8Alloc(arena, wide[0..got]) catch {
+            self.push_failed = true;
+            return;
+        };
+        kept += 1;
+    }
+    // In the client area's pixels, as a cursor's position is.
+    var at: Point = .{};
+    _ = calls.DragQueryPoint(drop, &at);
+    push(self, .{ .drop = .{
+        .window = id,
+        .paths = paths[0..kept],
+        .x = @floatFromInt(at.x),
+        .y = @floatFromInt(at.y),
+    } });
 }
 
 /// Push, or remember that there was no room. A window procedure cannot fail, so
@@ -2791,6 +2865,54 @@ test "a message posted to the window comes back out as an event" {
     // acted on it.
     var after: Rect = .{};
     try testing.expect(self.u.GetClientRect(hwnd, &after) != 0);
+}
+
+test "files dropped on a window come out as one event, every path and the point they were let go at" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    if (self.drops == null) return error.SkipZigTest;
+
+    const id: event.WindowId = @enumFromInt(7);
+    const native = try vtable.createWindow(impl, testing.allocator, id, .{
+        .title = "fluxion-platform drop test",
+        .width = 320,
+        .height = 240,
+        .resizable = true,
+        .decorated = true,
+        .visible = false,
+        .maximized = false,
+        .gl = null,
+    });
+    defer vtable.destroyWindow(impl, testing.allocator, native);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    try vtable.pump(impl, &queue);
+    queue.clear();
+
+    // What the file manager hands over, made by hand: a `DROPFILES` header -
+    // where the names start, the point, not the frame, wide names - and the
+    // names after it, each ended, and the list ended by one more nothing.
+    const names = std.unicode.utf8ToUtf16LeStringLiteral("C:\\Levels\\meadow.json\x00C:\\Art\\hérø.png\x00\x00");
+    const DropFiles = extern struct { files: u32, x: i32, y: i32, non_client: i32, wide: i32 };
+    const bytes = @sizeOf(DropFiles) + names.len * 2;
+    const gmem_zeroinit: u32 = 0x0040;
+    const memory = self.k.GlobalAlloc(gmem_moveable | gmem_zeroinit, bytes) orelse return error.OutOfMemory;
+    const at: [*]u8 = @ptrCast(self.k.GlobalLock(memory) orelse return error.OutOfMemory);
+    const header: DropFiles = .{ .files = @sizeOf(DropFiles), .x = 120, .y = 45, .non_client = 0, .wide = 1 };
+    @memcpy(at[0..@sizeOf(DropFiles)], std.mem.asBytes(&header));
+    @memcpy(at[@sizeOf(DropFiles)..bytes], std.mem.sliceAsBytes(names[0..names.len]));
+    _ = self.k.GlobalUnlock(memory);
+    try testing.expect(self.u.PostMessageW(castWindow(native).hwnd, wm_dropfiles, @intFromPtr(memory), 0) != 0);
+
+    try vtable.pump(impl, &queue);
+    const dropped = (queue.next() orelse return error.NoEventArrived).drop;
+    try testing.expectEqual(id, dropped.window);
+    try testing.expectEqual(@as(usize, 2), dropped.paths.len);
+    try testing.expectEqualStrings("C:\\Levels\\meadow.json", dropped.paths[0]);
+    try testing.expectEqualStrings("C:\\Art\\hérø.png", dropped.paths[1]);
+    try testing.expectEqual(@as(f64, 120), dropped.x);
+    try testing.expectEqual(@as(f64, 45), dropped.y);
 }
 
 test "a dialog's answer comes out of a pump, naming its window and its id" {

@@ -160,10 +160,17 @@ pub const ScaleEvent = struct {
 };
 
 /// Files were dropped on the window. The paths belong to the library and are
-/// valid until the next `poll`; copy anything you keep.
+/// valid until the next `pump`, as a dialog's answer is; copy anything you
+/// keep.
 pub const DropEvent = struct {
     window: WindowId,
     paths: []const []const u8,
+    /// Where they were let go, in content-area coordinates like a
+    /// `CursorEvent`'s - where the program puts what was dropped: into the
+    /// folder under it, onto the thing under it. A drop the system says no
+    /// place for is at the origin.
+    x: f64 = 0,
+    y: f64 = 0,
 };
 
 /// Which file dialog an answer belongs to: the id `Context.openFileDialog`

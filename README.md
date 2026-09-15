@@ -17,6 +17,7 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `vulkan` | Which instance extensions this session needs, and turning a window into a surface. |
 | `text` | The text a keyboard actually produces, and the input method between the two. |
 | `dialog` | Asking the user for files or a folder, in the system's own dialog. |
+| `trash` | A file or a folder moved to the system's trash, where the user can take it back from. No window needed. |
 | `web` | What a browser build needs and `std` cannot give it: a console, a panic that says what it was, and the bytes of a dropped file. |
 | `backend` | What a windowing system has to answer to — the seam a new backend is written against. |
 
@@ -29,7 +30,7 @@ all.
 
 | Backend | State |
 | --- | --- |
-| `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition, clipboard, file and folder dialogs |
+| `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition, clipboard, file and folder dialogs, dropped files |
 | `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard, file and folder dialogs |
 | `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard, file and folder dialogs |
 | `android` | Activity lifecycle, surface create and loss, focus, keys, touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard, file and folder dialogs (with `FluxionActivity`) |
@@ -340,6 +341,33 @@ An app still on `android.app.NativeActivity` runs as before, and its dialog is
 while the picker was open - which a low-memory phone does - and the answer is
 let go there rather than crashing it. A package that builds its own APK can
 compile the source itself: it is `b.dependency(...).namedLazyPath("FluxionActivity.java")`.
+
+## Files dropped on a window, and the trash
+
+```zig
+switch (ev) {
+    .drop => |d| for (d.paths) |path| try bringIn(path, d.x, d.y), // where they were let go
+    else => {},
+}
+if (platform.trash.available) try platform.trash.move(gpa, io, "C:/game/art/old.png");
+```
+
+**A drop is one event for the whole armful**: every path, and the point it
+was let go at, in content-area coordinates like a `.cursor` event's - the
+folder or the thing under it is where it goes. The paths are the library's
+until the next `pump`, as a dialog's answer is. Windows (`WM_DROPFILES`) and
+the web have drops; X11 and Wayland do not yet.
+
+**The trash needs no window**, so a tool with none can use it, and a test.
+On Windows it asks the shell - `SHFileOperationW` with undo, the call
+Explorer's own Delete makes - and something the Recycle Bin cannot take is
+asked about before it is deleted for good, never deleted without a word. On
+a Linux desktop it follows the freedesktop.org Trash specification in the
+home trash, so a file manager's Restore puts the file back; one on another
+drive is `error.OtherDrive`, since moving it there would be copying it.
+`trash.freedesktop.move` does the same into any folder, which is what a test
+uses. Anywhere else it is `error.Unsupported`, and `trash.available` says so
+before anything is tried.
 
 ## Drawing: a context, or a surface, and nothing after that
 
