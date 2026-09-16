@@ -28,6 +28,7 @@ const dyn = @import("fluxion_dyn");
 
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
+const icon_mod = @import("../icon.zig");
 const event = @import("../event.zig");
 const input = @import("../input.zig");
 const monitor = @import("../monitor.zig");
@@ -451,6 +452,10 @@ const User32 = struct {
     /// system is concerned.
     CreateIconIndirect: *const fn (*const IconInfo) callconv(.winapi) ?HCURSOR,
     DestroyIcon: *const fn (HCURSOR) callconv(.winapi) i32,
+    /// `WM_SETICON` has to be sent rather than posted: the window keeps the
+    /// handle, and the old one can only be destroyed once it has.
+    SendMessageW: *const fn (HWND, u32, WPARAM, LPARAM) callconv(.winapi) LRESULT,
+    GetSystemMetrics: *const fn (i32) callconv(.winapi) i32,
     GetKeyState: *const fn (i32) callconv(.winapi) i16,
     GetMessageTime: *const fn () callconv(.winapi) i32,
     SystemParametersInfoW: *const fn (u32, u32, ?*anyopaque, u32) callconv(.winapi) i32,
@@ -611,6 +616,13 @@ const IconInfo = extern struct {
 const bi_bitfields: u32 = 3;
 const dib_rgb_colors: u32 = 0;
 
+/// `WM_SETICON`'s two sizes, and the metrics that say how big each should be.
+const wm_seticon: u32 = 0x0080;
+const icon_small: WPARAM = 0;
+const icon_big: WPARAM = 1;
+const sm_cxicon: i32 = 11;
+const sm_cxsmicon: i32 = 49;
+
 /// Windows 8.1 and later. Before it every monitor is 96 DPI as far as this
 /// library can tell, which is what the machine was anyway.
 const Shcore = struct {
@@ -746,6 +758,10 @@ const Native = struct {
     /// A cursor made from the program's own image, which outranks the shape
     /// until it is taken away again. Destroyed with the window.
     image: ?HCURSOR = null,
+    /// The window's icons, in the two sizes Windows asks for. Destroyed with
+    /// the window, after it has stopped using them.
+    icon_small: ?HCURSOR = null,
+    icon_big: ?HCURSOR = null,
     /// Where the pointer was parked when `disabled` began, so `normal` can put
     /// it back rather than leaving it in the middle of the screen.
     saved_x: i32 = 0,
@@ -815,6 +831,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
+    .setIcon = setIcon,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1459,6 +1476,8 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
     letGo(self, win);
     restoreDisplayMode(self, win);
     if (win.image) |one| _ = self.u.DestroyIcon(one);
+    if (win.icon_small) |one| _ = self.u.DestroyIcon(one);
+    if (win.icon_big) |one| _ = self.u.DestroyIcon(one);
 
     // Before the window: a context outliving its device context is a handle
     // into a window that no longer exists.
@@ -1570,11 +1589,21 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
 /// One image as a cursor: a top-down 32-bit bitmap with the alpha in it, the
 /// mask Windows keeps asking for and no longer reads, and the hotspot.
 fn cursorFromImage(self: *Impl, image: cursor_mod.Image) ?HCURSOR {
+    return iconFromPixels(self, image.pixels, image.width, image.height, .{
+        .icon = 0,
+        .x_hotspot = image.hot_x,
+        .y_hotspot = image.hot_y,
+    });
+}
+
+/// A cursor and an icon are the same object to Windows, and differ by one flag
+/// and whether the hotspot means anything.
+fn iconFromPixels(self: *Impl, pixels: []const u8, width: u32, height: u32, kind: IconInfo) ?HCURSOR {
     const g = self.g orelse return null;
 
     var header: BitmapV5Header = .{
-        .width = @intCast(image.width),
-        .height = -@as(i32, @intCast(image.height)),
+        .width = @intCast(width),
+        .height = -@as(i32, @intCast(height)),
     };
 
     const dc = self.u.GetDC(null) orelse return null;
@@ -1587,8 +1616,8 @@ fn cursorFromImage(self: *Impl, image: cursor_mod.Image) ?HCURSOR {
 
     // A 32-bit bitmap is blue, green, red, alpha; the image is the other way
     // round.
-    for (0..image.width * image.height) |pixel| {
-        const from = image.pixels[pixel * 4 ..][0..4];
+    for (0..width * height) |pixel| {
+        const from = pixels[pixel * 4 ..][0..4];
         const to = bytes[pixel * 4 ..][0..4];
         to[0] = from[2];
         to[1] = from[1];
@@ -1596,16 +1625,49 @@ fn cursorFromImage(self: *Impl, image: cursor_mod.Image) ?HCURSOR {
         to[3] = from[3];
     }
 
-    const mask = g.CreateBitmap(@intCast(image.width), @intCast(image.height), 1, 1, null) orelse return null;
+    const mask = g.CreateBitmap(@intCast(width), @intCast(height), 1, 1, null) orelse return null;
     defer _ = g.DeleteObject(mask);
 
-    var info: IconInfo = .{
-        .x_hotspot = image.hot_x,
-        .y_hotspot = image.hot_y,
-        .mask = mask,
-        .color = colour,
-    };
+    var info: IconInfo = kind;
+    info.mask = mask;
+    info.color = colour;
     return self.u.CreateIconIndirect(&info);
+}
+
+/// The title bar's icon and the one alt-tab shows, each the size Windows asked
+/// for. A system that scales an icon it was not given makes it blurry, so both
+/// are picked from the list rather than sharing one.
+fn setIcon(impl: backend.Impl, native: backend.NativeWindow, images: []const icon_mod.Image) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+
+    if (images.len == 0) {
+        putIcon(self, win, icon_small, null);
+        putIcon(self, win, icon_big, null);
+        return;
+    }
+
+    const small = icon_mod.best(images, @intCast(@max(1, self.u.GetSystemMetrics(sm_cxsmicon)))).?;
+    const big = icon_mod.best(images, @intCast(@max(1, self.u.GetSystemMetrics(sm_cxicon)))).?;
+
+    const made_small = iconFromPixels(self, small.pixels, small.width, small.height, .{ .icon = 1 }) orelse
+        return error.Unavailable;
+    const made_big = iconFromPixels(self, big.pixels, big.width, big.height, .{ .icon = 1 }) orelse {
+        _ = self.u.DestroyIcon(made_small);
+        return error.Unavailable;
+    };
+
+    putIcon(self, win, icon_small, made_small);
+    putIcon(self, win, icon_big, made_big);
+}
+
+/// Hand one icon to the window and destroy the one it had. Windows keeps the
+/// handle until it is given another, so the old one can only go afterwards.
+fn putIcon(self: *Impl, win: *Native, which: WPARAM, made: ?HCURSOR) void {
+    _ = self.u.SendMessageW(win.hwnd, wm_seticon, which, @bitCast(@intFromPtr(made)));
+    const old = if (which == icon_small) &win.icon_small else &win.icon_big;
+    if (old.*) |one| _ = self.u.DestroyIcon(one);
+    old.* = made;
 }
 
 fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
@@ -3442,6 +3504,27 @@ test "a confined and hidden pointer is held and unseen only while the window has
     try vtable.setCursorImage(impl, win, null);
     try testing.expectEqual(@as(?HCURSOR, null), win.image);
     try testing.expectEqual(win.shape, pointerShape(cast(impl), win));
+}
+
+test "an icon is set in both sizes, and an empty list takes them away" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const win = try hiddenWindow(impl, @enumFromInt(11));
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+
+    var small: [16 * 16 * 4]u8 = @splat(0x30);
+    var large: [32 * 32 * 4]u8 = @splat(0x60);
+    try vtable.setIcon(impl, win, &.{
+        .{ .pixels = &small, .width = 16, .height = 16 },
+        .{ .pixels = &large, .width = 32, .height = 32 },
+    });
+    try testing.expect(win.icon_small != null);
+    try testing.expect(win.icon_big != null);
+    try testing.expect(win.icon_small != win.icon_big);
+
+    try vtable.setIcon(impl, win, &.{});
+    try testing.expectEqual(@as(?HCURSOR, null), win.icon_small);
+    try testing.expectEqual(@as(?HCURSOR, null), win.icon_big);
 }
 
 test "Windows' own double click is a press that says so, an extra button's too" {

@@ -59,6 +59,7 @@ const testing = std.testing;
 
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
+const icon_mod = @import("../icon.zig");
 const dialog = @import("../dialog.zig");
 const event = @import("../event.zig");
 const input = @import("../input.zig");
@@ -227,6 +228,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
+    .setIcon = setIcon,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -549,6 +551,26 @@ fn setCursorPos(impl: backend.Impl, native: backend.NativeWindow, x: f64, y: f64
 fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: cursor_mod.Shape) Error!void {
     _ = impl;
     if (js.setCursorShape(castWindow(native).handle, @intFromEnum(shape)) == 0) return error.Unavailable;
+}
+
+/// A page's icon is the tab's, and a tab has one: the largest of the list goes
+/// to the page as a PNG in a `<link rel="icon">`, and an empty list puts back
+/// whatever the page had.
+fn setIcon(impl: backend.Impl, native: backend.NativeWindow, images: []const icon_mod.Image) Error!void {
+    _ = impl;
+    const handle = castWindow(native).handle;
+    const largest = icon_mod.best(images, icon_mod.Image.max_side) orelse {
+        _ = js.setIcon(handle, null, 0, 0, 0);
+        return;
+    };
+    const made = js.setIcon(
+        handle,
+        largest.pixels.ptr,
+        @intCast(largest.pixels.len),
+        largest.width,
+        largest.height,
+    );
+    if (made == 0) return error.Unavailable;
 }
 
 /// `cursor: url(...) x y`, which the glue makes a PNG for. A browser draws one
@@ -1435,6 +1457,27 @@ test "a button, the pointer and the wheel come through in the library's terms" {
             // Down is negative here, as on every other backend.
             try testing.expectApproxEqAbs(@as(f64, -1), queue.next().?.scroll.y, 1e-9);
             try testing.expectApproxEqAbs(@as(f64, -1), queue.next().?.scroll.y, 1e-9);
+        }
+    }.run);
+}
+
+test "an icon goes to the page as the largest it was given" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            _ = queue;
+            var small: [2 * 2 * 4]u8 = @splat(0x20);
+            var large: [4 * 4 * 4]u8 = @splat(0);
+            large[0] = 9;
+            try vtable.setIcon(impl, native, &.{
+                .{ .pixels = &small, .width = 2, .height = 2 },
+                .{ .pixels = &large, .width = 4, .height = 4 },
+            });
+            const canvas = stub.canvasFor(1).?;
+            try testing.expectEqual([2]u32{ 4, 4 }, canvas.icon_size);
+            try testing.expectEqual(@as(u8, 9), canvas.icon_pixel[0]);
+
+            try vtable.setIcon(impl, native, &.{});
+            try testing.expectEqual([2]u32{ 0, 0 }, canvas.icon_size);
         }
     }.run);
 }

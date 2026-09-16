@@ -91,6 +91,10 @@ pub extern "fluxion_platform" fn setRawMouseMotion(handle: u32, on: u32) u32;
 /// A `cursor.Shape`, by number.
 pub extern "fluxion_platform" fn setCursorShape(handle: u32, shape: u32) u32;
 
+/// The window's icon, which on a page is the tab's: `len` bytes of RGBA at
+/// `pixels`. A null pointer puts back whatever the page had before.
+pub extern "fluxion_platform" fn setIcon(handle: u32, pixels: ?[*]const u8, len: u32, width: u32, height: u32) u32;
+
 /// An image as the pointer: `len` bytes of RGBA at `pixels`, and where in it
 /// the pointer points. A null pointer puts the shape back. Zero where the page
 /// could not make a cursor of it.

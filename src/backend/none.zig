@@ -18,6 +18,7 @@ const testing = std.testing;
 
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
+const icon_mod = @import("../icon.zig");
 const event = @import("../event.zig");
 const input = @import("../input.zig");
 const monitor = @import("../monitor.zig");
@@ -73,6 +74,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
+    .setIcon = setIcon,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -307,6 +309,11 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
 
 fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
     _ = .{ impl, native, image };
+    return error.Unavailable;
+}
+
+fn setIcon(impl: backend.Impl, native: backend.NativeWindow, images: []const icon_mod.Image) Error!void {
+    _ = .{ impl, native, images };
     return error.Unavailable;
 }
 

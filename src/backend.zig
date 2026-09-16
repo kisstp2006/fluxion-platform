@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const cursor = @import("cursor.zig");
 const dialog = @import("dialog.zig");
 const event = @import("event.zig");
+const icon = @import("icon.zig");
 const input = @import("input.zig");
 const keys = @import("keys.zig");
 const monitor = @import("monitor.zig");
@@ -209,6 +210,10 @@ pub const Vtable = struct {
     /// The pixels last only for the call: a backend that needs them afterwards
     /// hands them to the system, which keeps its own copy.
     setCursorImage: *const fn (impl: Impl, native: NativeWindow, image: ?cursor.Image) Error!void,
+
+    /// The window's own picture, in as many sizes as the program has. An empty
+    /// list puts the system's own back. The pixels last only for the call.
+    setIcon: *const fn (impl: Impl, native: NativeWindow, images: []const icon.Image) Error!void,
 
     /// The user's scroll setting, asked for each time so a change is heard at once.
     scrollLines: *const fn (impl: Impl) input.ScrollLines,

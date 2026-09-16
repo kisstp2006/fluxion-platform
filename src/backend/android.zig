@@ -58,6 +58,7 @@ const virtual_key = @import("virtual_key.zig");
 const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
 const cursor_mod = @import("../cursor.zig");
+const icon_mod = @import("../icon.zig");
 
 const Error = platform.Error;
 
@@ -714,6 +715,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
+    .setIcon = setIcon,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1364,6 +1366,11 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
 
 fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
     _ = .{ impl, native, image };
+    return error.Unavailable;
+}
+
+fn setIcon(impl: backend.Impl, native: backend.NativeWindow, images: []const icon_mod.Image) Error!void {
+    _ = .{ impl, native, images };
     return error.Unavailable;
 }
 

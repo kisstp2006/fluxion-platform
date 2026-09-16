@@ -18,6 +18,7 @@ const testing = std.testing;
 const Context = @import("Context.zig");
 const Window = @import("Window.zig");
 const backend = @import("backend.zig");
+const icon = @import("icon.zig");
 const keys = @import("keys.zig");
 const platform = @import("platform.zig");
 
@@ -249,6 +250,32 @@ test "the polled state starts empty and follows the events" {
     try testing.expect(!ctx.key(.w));
 }
 
+test "an icon is taken in every size, or the backend says it cannot" {
+    var fixture: Fixture = .{};
+    if (!fixture.open()) return error.SkipZigTest;
+    defer fixture.close();
+
+    var small: [16 * 16 * 4]u8 = @splat(0x20);
+    var large: [32 * 32 * 4]u8 = @splat(0x90);
+    const images = [_]icon.Image{
+        .{ .pixels = &small, .width = 16, .height = 16 },
+        .{ .pixels = &large, .width = 32, .height = 32 },
+    };
+
+    // Wayland and Android have no window icon to set, and say so.
+    fixture.win.setIcon(&images) catch |err| switch (err) {
+        error.Unavailable => return,
+        else => return err,
+    };
+    // Whichever way that went, the system's own comes back.
+    try fixture.win.setIcon(&.{});
+
+    // An image no system would take is refused before any of them is asked.
+    try testing.expectError(error.Unavailable, fixture.win.setIcon(&.{
+        .{ .pixels = &small, .width = 16, .height = 17 },
+    }));
+}
+
 test "a stale window refuses every state call rather than crashing" {
     var ctx = try Context.init(testing.allocator, .{ .select = .{ .only = .none } });
     defer ctx.deinit();
@@ -264,6 +291,7 @@ test "a stale window refuses every state call rather than crashing" {
     try testing.expectError(error.Unavailable, stale.requestAttention());
     try testing.expectError(error.Unavailable, stale.setSizeLimits(.{}));
     try testing.expectError(error.Unavailable, stale.setOpacity(1));
+    try testing.expectError(error.Unavailable, stale.setIcon(&.{}));
 
     try testing.expectEqual([2]i32{ 0, 0 }, stale.position());
     try testing.expect(!stale.isIconified());

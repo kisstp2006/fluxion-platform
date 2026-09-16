@@ -177,6 +177,14 @@ entered, the one showing most of an X11 window - and the primary one where the
 system cannot tell. What `setFullscreen(.{ .borderless = win.monitor().? })`
 wants.
 
+**`win.setIcon` takes every size at once**, because a system picks one per
+place - Windows wants a small one for the title bar and a large one for
+alt-tab, X11 hands the lot to the window manager. Straight RGBA, like a
+cursor's image; an empty list puts the system's own back. A page has one icon,
+which is the tab's, so the largest is what it gets. Wayland says
+`error.Unavailable`: there a window's picture comes from the desktop file that
+matches the application id, not from the window.
+
 ## The cursor is what makes a camera possible
 
 Five modes, and the difference between two of them is the difference between

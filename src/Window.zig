@@ -18,6 +18,7 @@ const testing = std.testing;
 
 const backend = @import("backend.zig");
 const cursor = @import("cursor.zig");
+const icon = @import("icon.zig");
 const monitor_mod = @import("monitor.zig");
 const gl = @import("gl.zig");
 const vulkan = @import("vulkan.zig");
@@ -481,6 +482,22 @@ pub fn setCursorImage(self: Window, image: ?cursor.Image) Error!void {
         if (!one.valid()) return error.Unavailable;
     }
     return self.ctx.vtable.setCursorImage(self.ctx.impl, e.native, image);
+}
+
+/// The picture the system shows beside this window's name: in the title bar,
+/// in the task bar, in the alt-tab list.
+///
+/// Pass every size the program has and let the system pick - see `icon`. An
+/// empty list puts the system's own back. `error.Unavailable` where a window's
+/// icon is not the window's to set: Android, and a Wayland compositor with no
+/// icon protocol, where the desktop file that matches the application id
+/// carries it instead.
+pub fn setIcon(self: Window, images: []const icon.Image) Error!void {
+    const e = self.ctx.entry(self.id) orelse return error.Unavailable;
+    for (images) |image| {
+        if (!image.valid()) return error.Unavailable;
+    }
+    return self.ctx.vtable.setIcon(self.ctx.impl, e.native, images);
 }
 
 /// The windowing system's own handle, as a number: an `HWND`, an X11 `Window`,

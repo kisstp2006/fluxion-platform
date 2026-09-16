@@ -641,6 +641,20 @@ export class Platform {
           return 1;
         },
 
+        setIcon: (handle, pixels, len, width, height) => {
+          if (!self.windows.get(handle)) return 0;
+          const link = self.favicon();
+          if (!link) return 0;
+          if (!pixels) {
+            self.resetFavicon();
+            return 1;
+          }
+          const url = self.pngUrl(pixels, len, width, height);
+          if (!url) return 0;
+          link.href = url;
+          return 1;
+        },
+
         setCursorImage: (handle, pixels, len, width, height, hotX, hotY) => {
           const win = self.windows.get(handle);
           if (!win) return 0;
@@ -649,7 +663,7 @@ export class Platform {
             self.applyCursor(win);
             return 1;
           }
-          const url = self.cursorUrl(pixels, len, width, height);
+          const url = self.pngUrl(pixels, len, width, height);
           if (!url) return 0;
           win.image = `url(${url}) ${hotX} ${hotY}, auto`;
           self.applyCursor(win);
@@ -1732,13 +1746,43 @@ export class Platform {
     win.canvas.style.cursor = win.image ?? (SHAPES[win.shape] ?? "default");
   }
 
+  /// The page's `<link rel="icon">`, made if the page has none.
+  favicon() {
+    if (this.iconLink) return this.iconLink;
+    let link = document.querySelector?.("link[rel~='icon']") ?? null;
+    this.iconMade = !link;
+    if (!link) {
+      const head = document.head ?? document.body;
+      if (!head) return null;
+      link = document.createElement("link");
+      link.rel = "icon";
+      head.appendChild(link);
+    }
+    this.iconWas = link.href ?? "";
+    this.iconLink = link;
+    return link;
+  }
+
+  /// Back to the page's own icon: the address it had, or no link at all where
+  /// the page never had one.
+  resetFavicon() {
+    const link = this.iconLink;
+    if (!link) return;
+    if (this.iconMade) {
+      link.remove?.();
+    } else {
+      link.href = this.iconWas;
+    }
+    this.iconLink = null;
+  }
+
   /// The program's pixels as a PNG in a `data:` address.
   ///
   /// CSS takes an image and nothing else - there is no way to hand a page raw
   /// pixels for a cursor - so they go through a canvas, whose `toDataURL` is
   /// the one encoder every browser already has. Null where the page would not
   /// give a 2D context, which is a browser with canvas turned off.
-  cursorUrl(pixels, len, width, height) {
+  pngUrl(pixels, len, width, height) {
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;

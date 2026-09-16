@@ -43,6 +43,7 @@ const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
 const evdev = @import("evdev.zig");
 const cursor_mod = @import("../cursor.zig");
+const icon_mod = @import("../icon.zig");
 const clipboard = @import("clipboard.zig");
 const linux_dialog = @import("linux_dialog.zig");
 
@@ -855,6 +856,7 @@ const Impl = struct {
     net_wm_window_opacity: Atom,
     cardinal: Atom,
     net_wm_state_fullscreen: Atom,
+    net_wm_icon: Atom,
     net_workarea: Atom,
     wm_state: Atom,
     scale: f32,
@@ -1026,6 +1028,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
+    .setIcon = setIcon,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1073,6 +1076,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .net_wm_window_opacity = x.XInternAtom(display, "_NET_WM_WINDOW_OPACITY", 0),
         .cardinal = x.XInternAtom(display, "CARDINAL", 0),
         .net_wm_state_fullscreen = x.XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", 0),
+        .net_wm_icon = x.XInternAtom(display, "_NET_WM_ICON", 0),
         .net_workarea = x.XInternAtom(display, "_NET_WORKAREA", 0),
         .wm_state = x.XInternAtom(display, "WM_STATE", 0),
         .scale = readScale(x, display),
@@ -1444,6 +1448,55 @@ fn xcursorLibrary(self: *Impl) ?Xcursor {
     self.xcursor = lib;
     self.xc = bound;
     return bound;
+}
+
+/// `_NET_WM_ICON`: every size at once, and the window manager picks. Width,
+/// height and then the pixels of each image in turn, as 32-bit cardinals -
+/// which Xlib takes as an array of `long` and narrows on the way out, so the
+/// buffer is `c_ulong` even though the property is 32 bits wide.
+fn setIcon(impl: backend.Impl, native: backend.NativeWindow, images: []const icon_mod.Image) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+
+    if (images.len == 0) {
+        _ = self.x.XDeleteProperty(self.display, win.window, self.net_wm_icon);
+        _ = self.x.XFlush(self.display);
+        return;
+    }
+
+    var words: usize = 0;
+    for (images) |image| words += 2 + @as(usize, image.width) * image.height;
+
+    const buffer = self.gpa.alloc(c_ulong, words) catch return error.OutOfMemory;
+    defer self.gpa.free(buffer);
+
+    var at: usize = 0;
+    for (images) |image| {
+        buffer[at] = image.width;
+        buffer[at + 1] = image.height;
+        at += 2;
+        // ARGB in one word, and not premultiplied: what the spec asks for.
+        for (0..image.width * image.height) |pixel| {
+            const from = image.pixels[pixel * 4 ..][0..4];
+            buffer[at + pixel] = (@as(c_ulong, from[3]) << 24) |
+                (@as(c_ulong, from[0]) << 16) |
+                (@as(c_ulong, from[1]) << 8) |
+                @as(c_ulong, from[2]);
+        }
+        at += @as(usize, image.width) * image.height;
+    }
+
+    _ = self.x.XChangeProperty(
+        self.display,
+        win.window,
+        self.net_wm_icon,
+        self.cardinal,
+        32,
+        prop_mode_replace,
+        @ptrCast(buffer.ptr),
+        @intCast(words),
+    );
+    _ = self.x.XFlush(self.display);
 }
 
 fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
@@ -3421,6 +3474,85 @@ test "the core cursor font has the new shapes, and still has no diagonals" {
     };
     try vtable.setCursorImage(impl, native, null);
     try testing.expectEqual(@as(Cursor, 0), win.image);
+}
+
+test "an icon is every size at once, as the window manager's own property" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    const native = try vtable.createWindow(impl, testing.allocator, @enumFromInt(11), .{
+        .title = "fluxion-platform icon test",
+        .width = 320,
+        .height = 240,
+        .resizable = true,
+        .decorated = true,
+        .visible = false,
+        .maximized = false,
+        .gl = null,
+    });
+    defer vtable.destroyWindow(impl, testing.allocator, native);
+    const window = castWindow(native).window;
+
+    var small: [2 * 2 * 4]u8 = @splat(0);
+    small[0] = 0x11;
+    small[1] = 0x22;
+    small[2] = 0x33;
+    small[3] = 0x44;
+    var large: [4 * 4 * 4]u8 = @splat(0x80);
+    try vtable.setIcon(impl, native, &.{
+        .{ .pixels = &small, .width = 2, .height = 2 },
+        .{ .pixels = &large, .width = 4, .height = 4 },
+    });
+
+    var kind: Atom = 0;
+    var format: c_int = 0;
+    var count: c_ulong = 0;
+    var left: c_ulong = 0;
+    var bytes: ?[*]u8 = null;
+    const read = self.x.XGetWindowProperty(
+        self.display,
+        window,
+        self.net_wm_icon,
+        0,
+        1024,
+        0,
+        self.cardinal,
+        &kind,
+        &format,
+        &count,
+        &left,
+        &bytes,
+    );
+    try testing.expectEqual(@as(c_int, 0), read);
+    const words: [*]const c_ulong = @ptrCast(@alignCast(bytes.?));
+    defer _ = self.x.XFree(bytes);
+
+    // Two images: 2x2 and its four pixels, then 4x4 and its sixteen.
+    try testing.expectEqual(@as(c_ulong, 2 + 4 + 2 + 16), count);
+    try testing.expectEqual(@as(c_ulong, 2), words[0]);
+    try testing.expectEqual(@as(c_ulong, 2), words[1]);
+    // ARGB in one word, from RGBA in four bytes.
+    try testing.expectEqual(@as(c_ulong, 0x44112233), words[2]);
+    try testing.expectEqual(@as(c_ulong, 4), words[6]);
+
+    try vtable.setIcon(impl, native, &.{});
+    var after: ?[*]u8 = null;
+    _ = self.x.XGetWindowProperty(
+        self.display,
+        window,
+        self.net_wm_icon,
+        0,
+        1024,
+        0,
+        self.cardinal,
+        &kind,
+        &format,
+        &count,
+        &left,
+        &after,
+    );
+    defer _ = self.x.XFree(after);
+    try testing.expectEqual(@as(c_ulong, 0), count);
 }
 
 test "a second click soon and near is a double click, by the server's clock" {

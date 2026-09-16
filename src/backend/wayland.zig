@@ -55,6 +55,7 @@ const platform = @import("../platform.zig");
 const evdev = @import("evdev.zig");
 const virtual_key = @import("virtual_key.zig");
 const cursor_mod = @import("../cursor.zig");
+const icon_mod = @import("../icon.zig");
 const clipboard = @import("clipboard.zig");
 const linux_dialog = @import("linux_dialog.zig");
 
@@ -941,6 +942,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
+    .setIcon = setIcon,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1271,6 +1273,18 @@ fn freeCursorImage(self: *Impl, win: *Native) void {
     requestDestroy(self, one.buffer, buffer_destroy);
     requestDestroy(self, one.pool, shm_pool_destroy);
     if (comptime has_display) std.posix.munmap(one.memory);
+}
+
+/// A Wayland window has no icon of its own to set.
+///
+/// The picture beside a window's name comes from the desktop file whose name
+/// matches the application id, which is what `xdg_toplevel.set_app_id` says
+/// this window is. There is a protocol for handing one over as pixels -
+/// `xdg_toplevel_icon_v1` - and no compositor here advertises it yet, so this
+/// says so rather than sending a request into the dark.
+fn setIcon(impl: backend.Impl, native: backend.NativeWindow, images: []const icon_mod.Image) Error!void {
+    _ = .{ impl, native, images };
+    return error.Unavailable;
 }
 
 fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {

@@ -70,6 +70,7 @@ pub const keys = @import("keys.zig");
 pub const backend = @import("backend.zig");
 pub const input = @import("input.zig");
 pub const cursor = @import("cursor.zig");
+pub const icon = @import("icon.zig");
 pub const monitor = @import("monitor.zig");
 pub const gamepad = @import("gamepad.zig");
 pub const gl = @import("gl.zig");
@@ -138,6 +139,9 @@ pub const CursorShape = cursor.Shape;
 /// An image to draw as the pointer instead. See `Window.setCursorImage`.
 pub const CursorImage = cursor.Image;
 
+/// One drawing of a window's icon. See `Window.setIcon`.
+pub const IconImage = icon.Image;
+
 /// One display. See `monitor`.
 pub const Monitor = monitor.Monitor;
 
@@ -179,6 +183,7 @@ test {
     _ = backend;
     _ = input;
     _ = cursor;
+    _ = icon;
     _ = monitor;
     _ = gamepad;
     _ = gl;
