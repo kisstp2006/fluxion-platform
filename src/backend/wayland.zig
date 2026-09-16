@@ -197,6 +197,8 @@ const CoreInterfaces = struct {
     wl_output_interface: *const WlInterface,
     wl_region_interface: *const WlInterface,
     wl_shm_interface: *const WlInterface,
+    wl_shm_pool_interface: *const WlInterface,
+    wl_buffer_interface: *const WlInterface,
     wl_data_device_manager_interface: *const WlInterface,
     wl_data_device_interface: *const WlInterface,
     wl_data_source_interface: *const WlInterface,
@@ -297,6 +299,13 @@ const seat_get_pointer: u32 = 0;
 const seat_get_keyboard: u32 = 1;
 const pointer_set_cursor: u32 = 0;
 const pointer_release: u32 = 1;
+const shm_create_pool: u32 = 0;
+const shm_pool_create_buffer: u32 = 0;
+const shm_pool_destroy: u32 = 1;
+const buffer_destroy: u32 = 0;
+
+/// `WL_SHM_FORMAT_ARGB8888`, the one format every compositor has.
+const shm_format_argb8888: u32 = 0;
 
 const constraints_lock_pointer: u32 = 1;
 const constraints_confine_pointer: u32 = 2;
@@ -687,8 +696,8 @@ const Impl = struct {
     constraints: ?*Proxy = null,
     relative_manager: ?*Proxy = null,
 
-    /// The surface the themed cursor image is attached to. One per process,
-    /// because one pointer is.
+    /// The surface the cursor image is attached to. One per process, because
+    /// one pointer is.
     cursor_surface: ?*Proxy = null,
     /// The serial from the last `wl_pointer.enter`, which `set_cursor` needs
     /// and which nothing else carries.
@@ -852,6 +861,9 @@ const Native = struct {
 
     mode: cursor_mod.Mode = .normal,
     shape: cursor_mod.Shape = .arrow,
+    /// The program's own cursor for this window, which outranks the shape. Its
+    /// buffer is the compositor's to read until the window lets it go.
+    image: ?CursorImage = null,
     /// The constraint in force, and the relative pointer that reports motion
     /// while it is. Both are destroyed when the mode changes.
     locked: ?*Proxy = null,
@@ -928,6 +940,7 @@ pub const vtable: backend.Vtable = .{
     .setRawMouseMotion = setRawMouseMotion,
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
+    .setCursorImage = setCursorImage,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1125,34 +1138,149 @@ fn themeCursor(wc: WaylandCursor, theme: *WlCursorTheme, shape: cursor_mod.Shape
 fn showThemeCursor(self: *Impl, shape: cursor_mod.Shape) bool {
     const wc = self.wc orelse return false;
     const theme = self.theme orelse return false;
-    const surface = self.cursor_surface orelse return false;
-    const pointer = self.pointer orelse return false;
 
     const found = themeCursor(wc, theme, shape) orelse return false;
     const image = found.images[0];
     const buffer = wc.wl_cursor_image_get_buffer(image) orelse return false;
 
+    return putCursor(self, buffer, .{
+        .width = @intCast(image.width),
+        .height = @intCast(image.height),
+        .hot_x = @intCast(image.hotspot_x),
+        .hot_y = @intCast(image.hotspot_y),
+    });
+}
+
+/// The program's own image where it set one over this window, and the theme's
+/// otherwise.
+fn showCursor(self: *Impl, win: *Native) bool {
+    if (win.image) |one| return putCursor(self, one.buffer, one.size);
+    return showThemeCursor(self, win.shape);
+}
+
+/// How big a cursor is and where in it the pointer points, in surface pixels.
+const CursorSize = struct {
+    width: i32,
+    height: i32,
+    hot_x: i32,
+    hot_y: i32,
+};
+
+/// Attach a buffer to the cursor surface and make it the pointer.
+fn putCursor(self: *Impl, buffer: *Proxy, shown: CursorSize) bool {
+    const surface = self.cursor_surface orelse return false;
+    const pointer = self.pointer orelse return false;
+
     var attach = [_]WlArgument{ .{ .o = buffer }, .{ .i = 0 }, .{ .i = 0 } };
     request(self, surface, surface_attach, &attach);
 
-    var damage = [_]WlArgument{
-        .{ .i = 0 },
-        .{ .i = 0 },
-        .{ .i = @intCast(image.width) },
-        .{ .i = @intCast(image.height) },
-    };
+    var damage = [_]WlArgument{ .{ .i = 0 }, .{ .i = 0 }, .{ .i = shown.width }, .{ .i = shown.height } };
     request(self, surface, surface_damage, &damage);
     request(self, surface, surface_commit, null);
 
     var set = [_]WlArgument{
         .{ .u = self.enter_serial },
         .{ .o = surface },
-        .{ .i = @intCast(image.hotspot_x) },
-        .{ .i = @intCast(image.hotspot_y) },
+        .{ .i = shown.hot_x },
+        .{ .i = shown.hot_y },
     };
     request(self, pointer, pointer_set_cursor, &set);
     _ = self.w.wl_display_flush(self.display);
     return true;
+}
+
+/// The program's own cursor: a buffer the compositor reads the pixels from, and
+/// the memory both sides share. One per context, because one pointer is.
+const CursorImage = struct {
+    buffer: *Proxy,
+    pool: *Proxy,
+    memory: []align(std.heap.page_size_min) u8,
+    size: CursorSize,
+};
+
+/// An image in memory the compositor can read: a file, mapped here and handed
+/// over as a pool, with one buffer in it.
+fn makeCursorImage(self: *Impl, image: cursor_mod.Image) Error!CursorImage {
+    if (comptime !has_display) return error.Unavailable;
+    const shm = self.shm orelse return error.Unavailable;
+    const bytes = @as(usize, image.width) * image.height * 4;
+
+    const fd = std.posix.memfd_create("fluxion-cursor", 0) catch return error.Unavailable;
+    // The pool below carries a copy of the descriptor, so this one is only
+    // needed until it is sent.
+    defer _ = c.close(fd);
+    // Straight to the kernel: `std.Io` wants a whole event loop to set a
+    // length with, and this is one syscall on the only system that has
+    // Wayland.
+    if (std.posix.errno(std.os.linux.ftruncate(fd, @intCast(bytes))) != .SUCCESS) return error.Unavailable;
+
+    const memory = std.posix.mmap(
+        null,
+        bytes,
+        .{ .READ = true, .WRITE = true },
+        .{ .TYPE = .SHARED },
+        fd,
+        0,
+    ) catch return error.Unavailable;
+    errdefer std.posix.munmap(memory);
+
+    // `ARGB8888` is one little-endian word a pixel - blue, green, red, alpha in
+    // memory - with the colours already multiplied by the alpha.
+    for (0..image.width * image.height) |pixel| {
+        const from = image.pixels[pixel * 4 ..][0..4];
+        const alpha: u32 = from[3];
+        const to = memory[pixel * 4 ..][0..4];
+        to[0] = @intCast(@as(u32, from[2]) * alpha / 255);
+        to[1] = @intCast(@as(u32, from[1]) * alpha / 255);
+        to[2] = @intCast(@as(u32, from[0]) * alpha / 255);
+        to[3] = from[3];
+    }
+
+    var pool_args = [_]WlArgument{ .{ .n = 0 }, .{ .h = fd }, .{ .i = @intCast(bytes) } };
+    const pool = construct(self, shm, shm_create_pool, self.core.wl_shm_pool_interface, 1, &pool_args) orelse
+        return error.Unavailable;
+    errdefer requestDestroy(self, pool, shm_pool_destroy);
+
+    var buffer_args = [_]WlArgument{
+        .{ .n = 0 },
+        .{ .i = 0 },
+        .{ .i = @intCast(image.width) },
+        .{ .i = @intCast(image.height) },
+        .{ .i = @intCast(image.width * 4) },
+        .{ .u = shm_format_argb8888 },
+    };
+    const buffer = construct(self, pool, shm_pool_create_buffer, self.core.wl_buffer_interface, 1, &buffer_args) orelse
+        return error.Unavailable;
+
+    return .{
+        .buffer = buffer,
+        .pool = pool,
+        .memory = memory,
+        .size = .{
+            .width = @intCast(image.width),
+            .height = @intCast(image.height),
+            .hot_x = @intCast(image.hot_x),
+            .hot_y = @intCast(image.hot_y),
+        },
+    };
+}
+
+fn freeCursorImage(self: *Impl, win: *Native) void {
+    const one = win.image orelse return;
+    win.image = null;
+    requestDestroy(self, one.buffer, buffer_destroy);
+    requestDestroy(self, one.pool, shm_pool_destroy);
+    if (comptime has_display) std.posix.munmap(one.memory);
+}
+
+fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+
+    freeCursorImage(self, win);
+    if (image) |one| win.image = try makeCursorImage(self, one);
+
+    if (self.pointer_focus == win and !pointerHidden(win)) _ = showCursor(self, win);
 }
 
 /// A null surface is how Wayland hides the pointer.
@@ -1194,7 +1322,7 @@ fn onUnconstrained(data: ?*anyopaque, proxy: *Proxy) callconv(.c) void {
     const self: *Impl = @ptrCast(@alignCast(data.?));
     const native = findByConstraint(self, proxy) orelse return;
     native.held = false;
-    if (self.pointer_focus == native and !pointerHidden(native)) _ = showThemeCursor(self, native.shape);
+    if (self.pointer_focus == native and !pointerHidden(native)) _ = showCursor(self, native);
 }
 
 fn findByConstraint(self: *Impl, proxy: *Proxy) ?*Native {
@@ -1226,7 +1354,7 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
     win.shape = shape;
 
     if (pointerHidden(win)) return;
-    if (!showThemeCursor(self, shape)) return error.Unavailable;
+    if (!showCursor(self, win)) return error.Unavailable;
 }
 
 fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_mod.Mode) Error!void {
@@ -1237,7 +1365,7 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
     releaseConstraint(self, win);
     win.mode = mode;
 
-    if (pointerHidden(win)) hidePointer(self) else _ = showThemeCursor(self, win.shape);
+    if (pointerHidden(win)) hidePointer(self) else _ = showCursor(self, win);
 
     if (!mode.confines()) {
         _ = self.w.wl_display_flush(self.display);
@@ -1249,7 +1377,7 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
         // pointer, and pretending otherwise would leave a camera that only
         // turns until the cursor hits an edge.
         win.mode = .normal;
-        _ = showThemeCursor(self, win.shape);
+        _ = showCursor(self, win);
         return error.Unavailable;
     };
     const pointer = self.pointer orelse {
@@ -1921,7 +2049,7 @@ fn onPointerEnter(
 
     // A client must set a cursor on entering, or the pointer is left as
     // whatever the last program made it.
-    if (pointerHidden(native)) hidePointer(self) else _ = showThemeCursor(self, native.shape);
+    if (pointerHidden(native)) hidePointer(self) else _ = showCursor(self, native);
 
     self.pointer_focus = native;
     native.last_x = fixedToDouble(x);
@@ -3039,6 +3167,7 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
         }
     }
     releaseConstraint(self, win);
+    freeCursorImage(self, win);
 
     // The context and its surface first, then the `wl_egl_window`, then the
     // protocol objects underneath. Each layer holds the one below it, and
@@ -3303,6 +3432,8 @@ fn fakeCore() CoreInterfaces {
         .wl_output_interface = &stub.iface,
         .wl_region_interface = &stub.iface,
         .wl_shm_interface = &stub.iface,
+        .wl_shm_pool_interface = &stub.iface,
+        .wl_buffer_interface = &stub.iface,
         .wl_data_device_manager_interface = &stub.iface,
         .wl_data_device_interface = &stub.iface,
         .wl_data_source_interface = &stub.iface,

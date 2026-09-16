@@ -446,6 +446,11 @@ const User32 = struct {
     /// a pointer's type - `MAKEINTRESOURCE`. Untyped, because half the ids are
     /// odd addresses and a `u16` pointer may not be.
     LoadCursorW: *const fn (?HINSTANCE, ?*const anyopaque) callconv(.winapi) ?HCURSOR,
+    /// A cursor of the program's own, from two bitmaps and a hotspot, and the
+    /// way to destroy one: a cursor made this way is an icon as far as the
+    /// system is concerned.
+    CreateIconIndirect: *const fn (*const IconInfo) callconv(.winapi) ?HCURSOR,
+    DestroyIcon: *const fn (HCURSOR) callconv(.winapi) i32,
     GetKeyState: *const fn (i32) callconv(.winapi) i16,
     GetMessageTime: *const fn () callconv(.winapi) i32,
     SystemParametersInfoW: *const fn (u32, u32, ?*anyopaque, u32) callconv(.winapi) i32,
@@ -555,7 +560,56 @@ const Gdi32 = struct {
     CreateDCW: *const fn (?[*:0]const u16, ?[*:0]const u16, ?[*:0]const u16, ?*const anyopaque) callconv(.winapi) ?*anyopaque,
     DeleteDC: *const fn (?*anyopaque) callconv(.winapi) i32,
     GetDeviceCaps: *const fn (?*anyopaque, i32) callconv(.winapi) i32,
+    /// The three a custom cursor is built from: the colours with their alpha,
+    /// the mask beside them, and the way to let both go again.
+    CreateDIBSection: *const fn (?*anyopaque, *const BitmapV5Header, u32, *?[*]u8, ?*anyopaque, u32) callconv(.winapi) ?*anyopaque,
+    CreateBitmap: *const fn (i32, i32, u32, u32, ?*const anyopaque) callconv(.winapi) ?*anyopaque,
+    DeleteObject: *const fn (?*anyopaque) callconv(.winapi) i32,
 };
+
+/// `BITMAPV5HEADER`: the one header with an alpha mask in it, which is how a
+/// 32-bit cursor keeps its transparency.
+const BitmapV5Header = extern struct {
+    size: u32 = @sizeOf(BitmapV5Header),
+    width: i32 = 0,
+    /// Negative is top-down, which is the order an image arrives in.
+    height: i32 = 0,
+    planes: u16 = 1,
+    bit_count: u16 = 32,
+    compression: u32 = bi_bitfields,
+    size_image: u32 = 0,
+    x_pels_per_meter: i32 = 0,
+    y_pels_per_meter: i32 = 0,
+    clr_used: u32 = 0,
+    clr_important: u32 = 0,
+    red_mask: u32 = 0x00FF0000,
+    green_mask: u32 = 0x0000FF00,
+    blue_mask: u32 = 0x000000FF,
+    alpha_mask: u32 = 0xFF000000,
+    cs_type: u32 = 0,
+    /// `CIEXYZTRIPLE`, which a bitmap with no colour profile leaves at zero.
+    endpoints: [9]i32 = @splat(0),
+    gamma_red: u32 = 0,
+    gamma_green: u32 = 0,
+    gamma_blue: u32 = 0,
+    intent: u32 = 0,
+    profile_data: u32 = 0,
+    profile_size: u32 = 0,
+    reserved: u32 = 0,
+};
+
+/// `ICONINFO`, with `icon` zero for a cursor: then the two hotspot fields mean
+/// what they say rather than being ignored.
+const IconInfo = extern struct {
+    icon: i32 = 0,
+    x_hotspot: u32 = 0,
+    y_hotspot: u32 = 0,
+    mask: ?*anyopaque = null,
+    color: ?*anyopaque = null,
+};
+
+const bi_bitfields: u32 = 3;
+const dib_rgb_colors: u32 = 0;
 
 /// Windows 8.1 and later. Before it every monitor is 96 DPI as far as this
 /// library can tell, which is what the machine was anyway.
@@ -689,6 +743,9 @@ const Native = struct {
     /// The shape to put back whenever Windows asks, which it does every time
     /// the pointer moves over the window.
     shape: ?HCURSOR = null,
+    /// A cursor made from the program's own image, which outranks the shape
+    /// until it is taken away again. Destroyed with the window.
+    image: ?HCURSOR = null,
     /// Where the pointer was parked when `disabled` began, so `normal` can put
     /// it back rather than leaving it in the middle of the screen.
     saved_x: i32 = 0,
@@ -757,6 +814,7 @@ pub const vtable: backend.Vtable = .{
     .setRawMouseMotion = setRawMouseMotion,
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
+    .setCursorImage = setCursorImage,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1400,6 +1458,7 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
     // Both belong to the whole machine and would outlive the window.
     letGo(self, win);
     restoreDisplayMode(self, win);
+    if (win.image) |one| _ = self.u.DestroyIcon(one);
 
     // Before the window: a context outliving its device context is a handle
     // into a window that no longer exists.
@@ -1505,7 +1564,58 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
     win.shape = wanted;
     // Applied now only if the pointer is over the window; `WM_SETCURSOR` puts
     // it back every time after that.
-    if (!pointerHidden(win)) _ = self.u.SetCursor(wanted);
+    if (!pointerHidden(win)) _ = self.u.SetCursor(pointerShape(self, win));
+}
+
+/// One image as a cursor: a top-down 32-bit bitmap with the alpha in it, the
+/// mask Windows keeps asking for and no longer reads, and the hotspot.
+fn cursorFromImage(self: *Impl, image: cursor_mod.Image) ?HCURSOR {
+    const g = self.g orelse return null;
+
+    var header: BitmapV5Header = .{
+        .width = @intCast(image.width),
+        .height = -@as(i32, @intCast(image.height)),
+    };
+
+    const dc = self.u.GetDC(null) orelse return null;
+    defer _ = self.u.ReleaseDC(null, dc);
+
+    var target: ?[*]u8 = null;
+    const colour = g.CreateDIBSection(dc, &header, dib_rgb_colors, &target, null, 0) orelse return null;
+    defer _ = g.DeleteObject(colour);
+    const bytes = target orelse return null;
+
+    // A 32-bit bitmap is blue, green, red, alpha; the image is the other way
+    // round.
+    for (0..image.width * image.height) |pixel| {
+        const from = image.pixels[pixel * 4 ..][0..4];
+        const to = bytes[pixel * 4 ..][0..4];
+        to[0] = from[2];
+        to[1] = from[1];
+        to[2] = from[0];
+        to[3] = from[3];
+    }
+
+    const mask = g.CreateBitmap(@intCast(image.width), @intCast(image.height), 1, 1, null) orelse return null;
+    defer _ = g.DeleteObject(mask);
+
+    var info: IconInfo = .{
+        .x_hotspot = image.hot_x,
+        .y_hotspot = image.hot_y,
+        .mask = mask,
+        .color = colour,
+    };
+    return self.u.CreateIconIndirect(&info);
+}
+
+fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+
+    const made: ?HCURSOR = if (image) |one| (cursorFromImage(self, one) orelse return error.Unavailable) else null;
+    if (win.image) |old| _ = self.u.DestroyIcon(old);
+    win.image = made;
+    if (!pointerHidden(win)) _ = self.u.SetCursor(pointerShape(self, win));
 }
 
 /// A window that has let go - a confining mode in the background - shows the
@@ -1516,7 +1626,8 @@ fn pointerHidden(win: *const Native) bool {
 
 /// Null is how Windows hides the pointer.
 fn pointerShape(self: *Impl, win: *const Native) ?HCURSOR {
-    return if (pointerHidden(win)) null else (win.shape orelse cursorFor(self, .arrow));
+    if (pointerHidden(win)) return null;
+    return win.image orelse win.shape orelse cursorFor(self, .arrow);
 }
 
 /// Hold the pointer inside the content area, or let it go.
@@ -3322,6 +3433,15 @@ test "a confined and hidden pointer is held and unseen only while the window has
     try vtable.setCursorShape(impl, win, .busy);
     try vtable.setCursorShape(impl, win, .vsplit);
     try testing.expectError(error.Unavailable, vtable.setCursorShape(impl, win, .can_drop));
+
+    // An image of the program's own outranks the shape until it is taken away.
+    var pixels: [4 * 4 * 4]u8 = @splat(0x80);
+    try vtable.setCursorImage(impl, win, .{ .pixels = &pixels, .width = 4, .height = 4, .hot_x = 2, .hot_y = 2 });
+    try testing.expect(win.image != null);
+    try testing.expectEqual(win.image, pointerShape(cast(impl), win));
+    try vtable.setCursorImage(impl, win, null);
+    try testing.expectEqual(@as(?HCURSOR, null), win.image);
+    try testing.expectEqual(win.shape, pointerShape(cast(impl), win));
 }
 
 test "Windows' own double click is a press that says so, an extra button's too" {

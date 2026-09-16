@@ -329,6 +329,9 @@ class Win {
 
     this.mode = MODE.normal;
     this.shape = 0;
+    /// The program's own cursor, as a whole CSS `cursor` value, or null for
+    /// whichever shape is set.
+    this.image = null;
     this.rawWanted = false;
     this.locked = false;
     this.skipMotion = false;
@@ -634,6 +637,21 @@ export class Platform {
           const win = self.windows.get(handle);
           if (!win) return 0;
           win.shape = shape;
+          self.applyCursor(win);
+          return 1;
+        },
+
+        setCursorImage: (handle, pixels, len, width, height, hotX, hotY) => {
+          const win = self.windows.get(handle);
+          if (!win) return 0;
+          if (!pixels) {
+            win.image = null;
+            self.applyCursor(win);
+            return 1;
+          }
+          const url = self.cursorUrl(pixels, len, width, height);
+          if (!url) return 0;
+          win.image = `url(${url}) ${hotX} ${hotY}, auto`;
           self.applyCursor(win);
           return 1;
         },
@@ -1707,7 +1725,28 @@ export class Platform {
   // -- the pointer --
 
   applyCursor(win) {
-    win.canvas.style.cursor = win.mode === MODE.hidden ? "none" : (SHAPES[win.shape] ?? "default");
+    if (win.mode === MODE.hidden) {
+      win.canvas.style.cursor = "none";
+      return;
+    }
+    win.canvas.style.cursor = win.image ?? (SHAPES[win.shape] ?? "default");
+  }
+
+  /// The program's pixels as a PNG in a `data:` address.
+  ///
+  /// CSS takes an image and nothing else - there is no way to hand a page raw
+  /// pixels for a cursor - so they go through a canvas, whose `toDataURL` is
+  /// the one encoder every browser already has. Null where the page would not
+  /// give a 2D context, which is a browser with canvas turned off.
+  cursorUrl(pixels, len, width, height) {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context || !canvas.toDataURL) return null;
+    const bytes = new Uint8ClampedArray(this.u8.buffer, pixels >>> 0, len >>> 0).slice();
+    context.putImageData(new ImageData(bytes, width, height), 0, 0);
+    return canvas.toDataURL("image/png");
   }
 
   /// Ask for pointer lock, and if the browser says no, remember to ask again

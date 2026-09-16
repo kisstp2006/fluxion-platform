@@ -119,6 +119,40 @@ pub const Shape = enum {
     }
 };
 
+/// An image to draw as the pointer, and the point in it that does the pointing.
+///
+/// A named `Shape` is still the better answer where one fits: the system's own
+/// cursor is the one that matches the theme, the size and the display's scale.
+/// This is for the pointer a program has to draw itself - a paint tool's brush,
+/// an editor's drag - and it is Godot's `set_custom_mouse_cursor` in one call
+/// rather than one per shape: an image replaces this window's pointer until
+/// null puts the shape back.
+pub const Image = struct {
+    /// Straight RGBA, one byte a channel, row by row from the top left: what a
+    /// PNG decodes to. Not premultiplied - the backends that want it that way
+    /// multiply it themselves.
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+    /// Which pixel of the image the pointer actually points with: the tip of an
+    /// arrow, the middle of a crosshair.
+    hot_x: u32 = 0,
+    hot_y: u32 = 0,
+
+    /// The longest side a system will take, which is Godot's limit too. A
+    /// cursor larger than this is one the user would lose.
+    pub const max_side: u32 = 256;
+
+    /// Is this an image a system could take: a size within the limit, the
+    /// pixels to fill it, and a hotspot inside it?
+    pub fn valid(self: Image) bool {
+        if (self.width == 0 or self.height == 0) return false;
+        if (self.width > max_side or self.height > max_side) return false;
+        if (self.hot_x >= self.width or self.hot_y >= self.height) return false;
+        return self.pixels.len == @as(usize, self.width) * self.height * 4;
+    }
+};
+
 /// How the pointer is set up for one window.
 pub const Options = struct {
     mode: Mode = .normal,
@@ -170,6 +204,19 @@ test "the shapes a system may not have are named" {
     try testing.expect(Shape.resize_nwse.optional());
     try testing.expect(Shape.not_allowed.optional());
     try testing.expect(Shape.can_drop.optional());
+}
+
+test "an image is checked before a system is handed it" {
+    var pixels: [4 * 4 * 4]u8 = @splat(0);
+    const good: Image = .{ .pixels = &pixels, .width = 4, .height = 4, .hot_x = 3, .hot_y = 0 };
+    try testing.expect(good.valid());
+
+    // Nothing to draw, too few pixels for the size, a hotspot outside the
+    // image, and a side no system takes.
+    try testing.expect(!(Image{ .pixels = &pixels, .width = 0, .height = 4 }).valid());
+    try testing.expect(!(Image{ .pixels = pixels[0..60], .width = 4, .height = 4 }).valid());
+    try testing.expect(!(Image{ .pixels = &pixels, .width = 4, .height = 4, .hot_x = 4 }).valid());
+    try testing.expect(!(Image{ .pixels = &pixels, .width = Image.max_side + 1, .height = 4 }).valid());
 }
 
 test "the defaults are what a window starts as" {

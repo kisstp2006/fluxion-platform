@@ -91,6 +91,19 @@ pub extern "fluxion_platform" fn setRawMouseMotion(handle: u32, on: u32) u32;
 /// A `cursor.Shape`, by number.
 pub extern "fluxion_platform" fn setCursorShape(handle: u32, shape: u32) u32;
 
+/// An image as the pointer: `len` bytes of RGBA at `pixels`, and where in it
+/// the pointer points. A null pointer puts the shape back. Zero where the page
+/// could not make a cursor of it.
+pub extern "fluxion_platform" fn setCursorImage(
+    handle: u32,
+    pixels: ?[*]const u8,
+    len: u32,
+    width: u32,
+    height: u32,
+    hot_x: u32,
+    hot_y: u32,
+) u32;
+
 /// Take the canvas fullscreen, or give it back. Zero where the page has no
 /// Fullscreen API at all.
 pub extern "fluxion_platform" fn setFullscreen(handle: u32, on: u32) u32;

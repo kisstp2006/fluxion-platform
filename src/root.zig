@@ -135,6 +135,9 @@ pub const CursorMode = cursor.Mode;
 /// One of the system's own cursor shapes. See `cursor`.
 pub const CursorShape = cursor.Shape;
 
+/// An image to draw as the pointer instead. See `Window.setCursorImage`.
+pub const CursorImage = cursor.Image;
+
 /// One display. See `monitor`.
 pub const Monitor = monitor.Monitor;
 

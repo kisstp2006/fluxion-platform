@@ -205,6 +205,11 @@ pub const Vtable = struct {
     /// Use one of the system's own cursor shapes.
     setCursorShape: *const fn (impl: Impl, native: NativeWindow, shape: cursor.Shape) Error!void,
 
+    /// Draw an image as the pointer, or put the shape back when it is null.
+    /// The pixels last only for the call: a backend that needs them afterwards
+    /// hands them to the system, which keeps its own copy.
+    setCursorImage: *const fn (impl: Impl, native: NativeWindow, image: ?cursor.Image) Error!void,
+
     /// The user's scroll setting, asked for each time so a change is heard at once.
     scrollLines: *const fn (impl: Impl) input.ScrollLines,
 

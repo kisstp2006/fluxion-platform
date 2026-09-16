@@ -123,6 +123,31 @@ test "every shape is either set or refused by name" {
     }
 }
 
+test "an image can be the pointer, or the backend says it cannot" {
+    var fixture: Fixture = .{};
+    if (!fixture.open()) return error.SkipZigTest;
+    defer fixture.close();
+
+    var pixels: [16 * 16 * 4]u8 = @splat(0xFF);
+    const image: cursor.Image = .{ .pixels = &pixels, .width = 16, .height = 16, .hot_x = 8, .hot_y = 8 };
+    try allowed(fixture.win.setCursorImage(image));
+    // Whichever way that went, the system's own cursor comes back.
+    try allowed(fixture.win.setCursorImage(null));
+
+    // An image no system would take is refused here rather than there: too few
+    // pixels for the size, and a side longer than any system allows.
+    try testing.expectError(error.Unavailable, fixture.win.setCursorImage(.{
+        .pixels = &pixels,
+        .width = 16,
+        .height = 17,
+    }));
+    try testing.expectError(error.Unavailable, fixture.win.setCursorImage(.{
+        .pixels = &pixels,
+        .width = cursor.Image.max_side + 1,
+        .height = 16,
+    }));
+}
+
 test "the pointer can be put somewhere, or the backend says it cannot" {
     var fixture: Fixture = .{};
     if (!fixture.open()) return error.SkipZigTest;
@@ -142,6 +167,7 @@ test "a stale window refuses every cursor call rather than crashing" {
     try testing.expectError(error.Unavailable, stale.setCursorMode(.disabled));
     try testing.expectError(error.Unavailable, stale.setCursorPos(0, 0));
     try testing.expectError(error.Unavailable, stale.setCursorShape(.ibeam));
+    try testing.expectError(error.Unavailable, stale.setCursorImage(null));
     try testing.expect(!stale.setRawMouseMotion(true));
 
     // And the readers answer with what a window that is not there would be.

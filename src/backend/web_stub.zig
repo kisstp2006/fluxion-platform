@@ -40,6 +40,10 @@ pub const Canvas = struct {
     opacity: f32 = 1,
     cursor_mode: u32 = 0,
     cursor_shape: u32 = 0,
+    /// The custom cursor: its size and hotspot, and the first pixel of it, so
+    /// a test can see what the page was handed. All zero for none.
+    cursor_image: [4]u32 = @splat(0),
+    cursor_pixel: [4]u8 = @splat(0),
     raw_motion: bool = false,
     text_input: bool = false,
     area: [4]i32 = @splat(0),
@@ -335,6 +339,19 @@ pub fn setRawMouseMotion(handle: u32, on: u32) u32 {
 pub fn setCursorShape(handle: u32, shape: u32) u32 {
     const slot = canvas(handle) orelse return 0;
     slot.cursor_shape = shape;
+    return 1;
+}
+
+pub fn setCursorImage(handle: u32, pixels: ?[*]const u8, len: u32, width: u32, height: u32, hot_x: u32, hot_y: u32) u32 {
+    const slot = canvas(handle) orelse return 0;
+    const bytes = pixels orelse {
+        slot.cursor_image = @splat(0);
+        slot.cursor_pixel = @splat(0);
+        return 1;
+    };
+    if (len < 4) return 0;
+    slot.cursor_image = .{ width, height, hot_x, hot_y };
+    slot.cursor_pixel = bytes[0..4].*;
     return 1;
 }
 

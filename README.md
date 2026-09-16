@@ -200,6 +200,20 @@ handles. `Shape.optional()` says which ones a system may not have, and `arrow`
 is what to draw instead: the diagonal resize arrows and "no entry" are missing
 from X11's core cursor font, and Windows has nothing for `can_drop`.
 
+**A pointer of your own**, where no named shape fits:
+
+```zig
+try win.setCursorImage(.{ .pixels = rgba, .width = 32, .height = 32, .hot_x = 4, .hot_y = 2 });
+try win.setCursorImage(null);                        // the shape again
+```
+
+Straight RGBA, row by row from the top left, up to 256 by 256, and the pixel
+in it that does the pointing. Windows makes an icon of it, X11 a cursor
+through `libXcursor`, Wayland a buffer in shared memory, and a page a PNG in a
+`data:` address. The named shape is still the better answer where one fits -
+the system's own cursor is the one that matches the theme, the size and the
+display's scale - and Android says `Unavailable`, having no pointer to draw.
+
 `setRawMouseMotion` returns whether it was granted rather than assuming.
 Acceleration is a curve meant to help a cursor land on a button and is exactly
 wrong for aiming - but not every system will turn it off, and a program that

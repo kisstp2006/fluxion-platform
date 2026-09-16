@@ -805,6 +805,29 @@ const Xrandr = struct {
 
 const randr_candidates: []const [:0]const u8 = &.{ "libXrandr.so.2", "libXrandr.so" };
 
+/// The library that turns pixels into a cursor. X11 itself has only two-colour
+/// bitmaps, so a program's own image needs this one - opened when the first
+/// image is set and not before.
+const xcursor_candidates: []const [:0]const u8 = &.{ "libXcursor.so.1", "libXcursor.so" };
+
+const XcursorImage = extern struct {
+    version: u32,
+    size: u32,
+    width: u32,
+    height: u32,
+    xhot: u32,
+    yhot: u32,
+    delay: u32,
+    /// ARGB, one word a pixel, with the colours already multiplied by alpha.
+    pixels: [*]u32,
+};
+
+const Xcursor = struct {
+    XcursorImageCreate: *const fn (c_int, c_int) callconv(.c) ?*XcursorImage,
+    XcursorImageDestroy: *const fn (*XcursorImage) callconv(.c) void,
+    XcursorImageLoadCursor: *const fn (*Display, *const XcursorImage) callconv(.c) Cursor,
+};
+
 /// The names to try, in order. The versioned one first, because the
 /// unversioned symlink is a developer package that is often not installed.
 const candidates: []const [:0]const u8 = &.{ "libX11.so.6", "libX11.so" };
@@ -843,6 +866,11 @@ const Impl = struct {
     /// the screen. Which is not a lie: without RandR that is all there is.
     xrandr: ?dyn.Library = null,
     xr: ?Xrandr = null,
+    /// `libXcursor`, opened the first time a program sets an image of its own.
+    /// `xcursor_tried` so a machine without it is asked once, not once a call.
+    xcursor: ?dyn.Library = null,
+    xc: ?Xcursor = null,
+    xcursor_tried: bool = false,
     /// Controllers, which the X server knows nothing about: on Linux a gamepad
     /// is a kernel device and is read the same way in every session.
     pads: linux_gamepad.Backend = .{},
@@ -947,6 +975,8 @@ const Native = struct {
     /// server resources and both are freed with the window.
     shape: Cursor = 0,
     blank: Cursor = 0,
+    /// The cursor made from the program's own image, which outranks the shape.
+    image: Cursor = 0,
     /// Where the pointer was when `disabled` began, so leaving can put it back.
     saved_x: c_int = 0,
     saved_y: c_int = 0,
@@ -995,6 +1025,7 @@ pub const vtable: backend.Vtable = .{
     .setRawMouseMotion = setRawMouseMotion,
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
+    .setCursorImage = setCursorImage,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1115,6 +1146,7 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     // leaves Xlib calling an address that is no longer mapped, which is a
     // segfault a long way from the line that caused it.
     if (self.xrandr) |*lib| lib.close();
+    if (self.xcursor) |*lib| lib.close();
     self.gl.close();
     self.lib.close();
     gpa.destroy(self);
@@ -1285,6 +1317,7 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
     restoreCrtc(self, win);
     if (win.shape != 0) _ = self.x.XFreeCursor(self.display, win.shape);
     if (win.blank != 0) _ = self.x.XFreeCursor(self.display, win.blank);
+    if (win.image != 0) _ = self.x.XFreeCursor(self.display, win.image);
 
     _ = self.windows.swapRemove(win.window);
     _ = self.x.XDestroyWindow(self.display, win.window);
@@ -1394,10 +1427,57 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
     if (win.shape != 0) _ = self.x.XFreeCursor(self.display, win.shape);
     win.shape = made;
 
-    if (!pointerHidden(win)) {
-        _ = self.x.XDefineCursor(self.display, win.window, made);
-        _ = self.x.XFlush(self.display);
+    applyCursor(self, win);
+}
+
+/// `libXcursor`, opened on the first image and remembered either way.
+fn xcursorLibrary(self: *Impl) ?Xcursor {
+    if (self.xc) |have| return have;
+    if (self.xcursor_tried) return null;
+    self.xcursor_tried = true;
+
+    var lib = dyn.Library.openAny(xcursor_candidates) catch return null;
+    const bound = lib.bind(Xcursor) catch {
+        lib.close();
+        return null;
+    };
+    self.xcursor = lib;
+    self.xc = bound;
+    return bound;
+}
+
+fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+
+    const one = image orelse {
+        if (win.image != 0) _ = self.x.XFreeCursor(self.display, win.image);
+        win.image = 0;
+        applyCursor(self, win);
+        return;
+    };
+
+    const xc = xcursorLibrary(self) orelse return error.Unavailable;
+    const holder = xc.XcursorImageCreate(@intCast(one.width), @intCast(one.height)) orelse return error.Unavailable;
+    defer xc.XcursorImageDestroy(holder);
+    holder.xhot = one.hot_x;
+    holder.yhot = one.hot_y;
+
+    // Xcursor takes one word a pixel, with the colours multiplied by the alpha.
+    for (0..one.width * one.height) |pixel| {
+        const from = one.pixels[pixel * 4 ..][0..4];
+        const alpha: u32 = from[3];
+        holder.pixels[pixel] = (alpha << 24) |
+            (@as(u32, from[0]) * alpha / 255 << 16) |
+            (@as(u32, from[1]) * alpha / 255 << 8) |
+            (@as(u32, from[2]) * alpha / 255);
     }
+
+    const made = xc.XcursorImageLoadCursor(self.display, holder);
+    if (made == 0) return error.Unavailable;
+    if (win.image != 0) _ = self.x.XFreeCursor(self.display, win.image);
+    win.image = made;
+    applyCursor(self, win);
 }
 
 /// A window that has let go - a confining mode in the background - shows the
@@ -1410,6 +1490,8 @@ fn applyCursor(self: *Impl, win: *Native) void {
     if (pointerHidden(win)) {
         if (win.blank == 0) win.blank = blankCursor(self, win.window);
         if (win.blank != 0) _ = self.x.XDefineCursor(self.display, win.window, win.blank);
+    } else if (win.image != 0) {
+        _ = self.x.XDefineCursor(self.display, win.window, win.image);
     } else if (win.shape != 0) {
         _ = self.x.XDefineCursor(self.display, win.window, win.shape);
     } else {
@@ -3327,6 +3409,18 @@ test "the core cursor font has the new shapes, and still has no diagonals" {
     try vtable.setCursorShape(impl, native, .vsplit);
     try vtable.setCursorShape(impl, native, .hsplit);
     try testing.expectError(error.Unavailable, vtable.setCursorShape(impl, native, .resize_nwse));
+
+    // An image needs libXcursor, which a machine may not have: either it was
+    // made, or the call said so. Taking it away always works.
+    var pixels: [8 * 8 * 4]u8 = @splat(0x40);
+    const image: cursor_mod.Image = .{ .pixels = &pixels, .width = 8, .height = 8, .hot_x = 4, .hot_y = 4 };
+    const win = castWindow(native);
+    vtable.setCursorImage(impl, native, image) catch |err| {
+        try testing.expectEqual(error.Unavailable, err);
+        try testing.expectEqual(@as(Cursor, 0), win.image);
+    };
+    try vtable.setCursorImage(impl, native, null);
+    try testing.expectEqual(@as(Cursor, 0), win.image);
 }
 
 test "a second click soon and near is a double click, by the server's clock" {

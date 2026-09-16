@@ -226,6 +226,7 @@ pub const vtable: backend.Vtable = .{
     .setRawMouseMotion = setRawMouseMotion,
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
+    .setCursorImage = setCursorImage,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -548,6 +549,29 @@ fn setCursorPos(impl: backend.Impl, native: backend.NativeWindow, x: f64, y: f64
 fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: cursor_mod.Shape) Error!void {
     _ = impl;
     if (js.setCursorShape(castWindow(native).handle, @intFromEnum(shape)) == 0) return error.Unavailable;
+}
+
+/// `cursor: url(...) x y`, which the glue makes a PNG for. A browser draws one
+/// only up to a size of its own - 128 by 128 in Chrome and Firefox - and
+/// silently keeps the arrow for anything larger, which is a browser's answer
+/// this side cannot see.
+fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
+    _ = impl;
+    const handle = castWindow(native).handle;
+    const one = image orelse {
+        _ = js.setCursorImage(handle, null, 0, 0, 0, 0, 0);
+        return;
+    };
+    const made = js.setCursorImage(
+        handle,
+        one.pixels.ptr,
+        @intCast(one.pixels.len),
+        one.width,
+        one.height,
+        one.hot_x,
+        one.hot_y,
+    );
+    if (made == 0) return error.Unavailable;
 }
 
 // -------------------------------------------------------------------------
@@ -1411,6 +1435,33 @@ test "a button, the pointer and the wheel come through in the library's terms" {
             // Down is negative here, as on every other backend.
             try testing.expectApproxEqAbs(@as(f64, -1), queue.next().?.scroll.y, 1e-9);
             try testing.expectApproxEqAbs(@as(f64, -1), queue.next().?.scroll.y, 1e-9);
+        }
+    }.run);
+}
+
+test "an image goes to the page as its pixels, and null takes it away" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            _ = queue;
+            var pixels: [2 * 2 * 4]u8 = @splat(0);
+            pixels[0] = 10;
+            pixels[1] = 20;
+            pixels[2] = 30;
+            pixels[3] = 40;
+
+            try vtable.setCursorImage(impl, native, .{
+                .pixels = &pixels,
+                .width = 2,
+                .height = 2,
+                .hot_x = 1,
+                .hot_y = 0,
+            });
+            const canvas = stub.canvasFor(1).?;
+            try testing.expectEqual([4]u32{ 2, 2, 1, 0 }, canvas.cursor_image);
+            try testing.expectEqual([4]u8{ 10, 20, 30, 40 }, canvas.cursor_pixel);
+
+            try vtable.setCursorImage(impl, native, null);
+            try testing.expectEqual([4]u32{ 0, 0, 0, 0 }, canvas.cursor_image);
         }
     }.run);
 }

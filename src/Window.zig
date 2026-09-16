@@ -470,6 +470,19 @@ pub fn setCursorShape(self: Window, shape: cursor.Shape) Error!void {
     return self.ctx.vtable.setCursorShape(self.ctx.impl, e.native, shape);
 }
 
+/// Draw an image as the pointer over this window, hotspot and all.
+///
+/// Null puts the shape back. `error.Unavailable` for an image no system would
+/// take - see `cursor.Image.valid` - and on a system that draws no pointer of
+/// its own at all, which is a phone.
+pub fn setCursorImage(self: Window, image: ?cursor.Image) Error!void {
+    const e = self.ctx.entry(self.id) orelse return error.Unavailable;
+    if (image) |one| {
+        if (!one.valid()) return error.Unavailable;
+    }
+    return self.ctx.vtable.setCursorImage(self.ctx.impl, e.native, image);
+}
+
 /// The windowing system's own handle, as a number: an `HWND`, an X11 `Window`,
 /// a `wl_surface`, an `ANativeWindow`. Zero if this handle is stale, or if the
 /// backend has none to give.

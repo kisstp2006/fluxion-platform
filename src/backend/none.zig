@@ -72,6 +72,7 @@ pub const vtable: backend.Vtable = .{
     .setRawMouseMotion = setRawMouseMotion,
     .setCursorPos = setCursorPos,
     .setCursorShape = setCursorShape,
+    .setCursorImage = setCursorImage,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -301,6 +302,11 @@ fn setCursorPos(impl: backend.Impl, native: backend.NativeWindow, x: f64, y: f64
 
 fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: cursor_mod.Shape) Error!void {
     _ = .{ impl, native, shape };
+    return error.Unavailable;
+}
+
+fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {
+    _ = .{ impl, native, image };
     return error.Unavailable;
 }
 
