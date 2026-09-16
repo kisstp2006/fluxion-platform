@@ -276,6 +276,7 @@ const MinMaxInfo = extern struct {
 // The standard cursors, as the integer resource ids `LoadCursorW` takes.
 const idc_arrow: *const anyopaque = @ptrFromInt(32512);
 const idc_ibeam: *const anyopaque = @ptrFromInt(32513);
+const idc_wait: *const anyopaque = @ptrFromInt(32514);
 const idc_cross: *const anyopaque = @ptrFromInt(32515);
 const idc_sizenwse: *const anyopaque = @ptrFromInt(32642);
 const idc_sizenesw: *const anyopaque = @ptrFromInt(32643);
@@ -284,6 +285,8 @@ const idc_sizens: *const anyopaque = @ptrFromInt(32645);
 const idc_sizeall: *const anyopaque = @ptrFromInt(32646);
 const idc_no: *const anyopaque = @ptrFromInt(32648);
 const idc_hand: *const anyopaque = @ptrFromInt(32649);
+const idc_appstarting: *const anyopaque = @ptrFromInt(32650);
+const idc_help: *const anyopaque = @ptrFromInt(32651);
 
 const wm_setcursor: u32 = 0x0020;
 const wm_mouseactivate: u32 = 0x0021;
@@ -1471,18 +1474,26 @@ fn nativeHandle(impl: backend.Impl, native: backend.NativeWindow) usize {
     return @intFromPtr(castWindow(native).hwnd);
 }
 
+/// Windows has no cursor for a drop that is allowed - the one the shell shows
+/// is drag-and-drop's own, not a system cursor - so that is the one shape this
+/// backend answers no to.
 fn cursorFor(self: *Impl, shape: cursor_mod.Shape) ?HCURSOR {
     return self.u.LoadCursorW(null, switch (shape) {
         .arrow => idc_arrow,
         .ibeam => idc_ibeam,
         .crosshair => idc_cross,
         .pointing_hand => idc_hand,
-        .resize_ew => idc_sizewe,
-        .resize_ns => idc_sizens,
+        .resize_ew, .hsplit => idc_sizewe,
+        .resize_ns, .vsplit => idc_sizens,
         .resize_nwse => idc_sizenwse,
         .resize_nesw => idc_sizenesw,
-        .resize_all => idc_sizeall,
+        // A drag is move's four arrows, as it is in Explorer.
+        .resize_all, .drag => idc_sizeall,
         .not_allowed => idc_no,
+        .wait => idc_wait,
+        .busy => idc_appstarting,
+        .help => idc_help,
+        .can_drop => return null,
     });
 }
 
@@ -1497,9 +1508,10 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
     if (!pointerHidden(win)) _ = self.u.SetCursor(wanted);
 }
 
-/// A disabled window in the background has let go, and shows the pointer.
+/// A window that has let go - a confining mode in the background - shows the
+/// pointer again.
 fn pointerHidden(win: *const Native) bool {
-    return win.mode == .hidden or (win.mode == .disabled and win.held);
+    return win.mode.hides() and (win.mode == .hidden or win.held);
 }
 
 /// Null is how Windows hides the pointer.
@@ -3276,6 +3288,40 @@ test "a confining mode holds the pointer only while the window has focus" {
 
     try vtable.setCursorMode(impl, win, .normal);
     try testing.expect(!win.held);
+}
+
+test "a confined and hidden pointer is held and unseen only while the window has focus" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    var was: Point = .{};
+    _ = self.u.GetCursorPos(&was);
+    defer _ = self.u.SetCursorPos(was.x, was.y);
+
+    const win = try hiddenWindow(impl, @enumFromInt(10));
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    try vtable.pump(impl, &queue);
+
+    try vtable.setCursorMode(impl, win, .confined_hidden);
+    try testing.expect(!win.held);
+    try testing.expect(!pointerHidden(win));
+
+    try postAndPump(impl, &queue, win, wm_setfocus, 0, 0);
+    try testing.expect(win.held);
+    try testing.expect(pointerHidden(win));
+
+    try postAndPump(impl, &queue, win, wm_killfocus, 0, 0);
+    try testing.expect(!win.held);
+    try testing.expect(!pointerHidden(win));
+
+    try vtable.setCursorMode(impl, win, .normal);
+
+    try vtable.setCursorShape(impl, win, .wait);
+    try vtable.setCursorShape(impl, win, .busy);
+    try vtable.setCursorShape(impl, win, .vsplit);
+    try testing.expectError(error.Unavailable, vtable.setCursorShape(impl, win, .can_drop));
 }
 
 test "Windows' own double click is a press that says so, an extra button's too" {

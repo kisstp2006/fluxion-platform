@@ -318,10 +318,10 @@ pub fn getState(handle: u32, state: u32) u32 {
     };
 }
 
-/// Everything but `captured`, which no browser can do.
+/// Everything but `captured` and `confined_hidden`, which no browser can do.
 pub fn setCursorMode(handle: u32, mode: u32) u32 {
     const slot = canvas(handle) orelse return 0;
-    if (mode == 2) return 0;
+    if (mode == 2 or mode == 4) return 0;
     slot.cursor_mode = mode;
     return 1;
 }

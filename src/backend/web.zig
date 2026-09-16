@@ -521,9 +521,10 @@ fn setOpacity(impl: backend.Impl, native: backend.NativeWindow, opacity: f32) Er
 // -------------------------------------------------------------------------
 
 /// `normal` and `hidden` are CSS; `disabled` is pointer lock, which the browser
-/// grants on a click if it turned down the first request. `captured` is the
-/// one no browser can do - a visible pointer held inside an element - and it
-/// is refused rather than approximated.
+/// grants on a click if it turned down the first request. `captured` and
+/// `confined_hidden` are the ones no browser can do - a pointer held inside an
+/// element that still has a position - and they are refused rather than
+/// approximated.
 fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_mod.Mode) Error!void {
     _ = impl;
     if (js.setCursorMode(castWindow(native).handle, @intFromEnum(mode)) == 0) return error.Unavailable;
@@ -1777,6 +1778,7 @@ test "what a page cannot do is refused, and what it can is done" {
             try testing.expectError(error.Unavailable, vtable.setPosition(impl, native, 1, 2));
             try testing.expectError(error.Unavailable, vtable.setCursorPos(impl, native, 1, 2));
             try testing.expectError(error.Unavailable, vtable.setCursorMode(impl, native, .captured));
+            try testing.expectError(error.Unavailable, vtable.setCursorMode(impl, native, .confined_hidden));
             try testing.expectError(error.Unavailable, vtable.setState(impl, native, .iconified));
             try testing.expectError(error.Unavailable, vtable.setState(impl, native, .attention));
             try testing.expectError(error.Unavailable, vtable.setFullscreen(impl, native, .{
@@ -1927,6 +1929,7 @@ test "the numbers the glue reads are the enums' own" {
     try testing.expectEqual(1, @intFromEnum(cursor_mod.Mode.hidden));
     try testing.expectEqual(2, @intFromEnum(cursor_mod.Mode.captured));
     try testing.expectEqual(3, @intFromEnum(cursor_mod.Mode.disabled));
+    try testing.expectEqual(4, @intFromEnum(cursor_mod.Mode.confined_hidden));
 
     try testing.expectEqual(0, @intFromEnum(cursor_mod.Shape.arrow));
     try testing.expectEqual(1, @intFromEnum(cursor_mod.Shape.ibeam));
@@ -1938,6 +1941,13 @@ test "the numbers the glue reads are the enums' own" {
     try testing.expectEqual(7, @intFromEnum(cursor_mod.Shape.resize_nesw));
     try testing.expectEqual(8, @intFromEnum(cursor_mod.Shape.resize_all));
     try testing.expectEqual(9, @intFromEnum(cursor_mod.Shape.not_allowed));
+    try testing.expectEqual(10, @intFromEnum(cursor_mod.Shape.wait));
+    try testing.expectEqual(11, @intFromEnum(cursor_mod.Shape.busy));
+    try testing.expectEqual(12, @intFromEnum(cursor_mod.Shape.help));
+    try testing.expectEqual(13, @intFromEnum(cursor_mod.Shape.drag));
+    try testing.expectEqual(14, @intFromEnum(cursor_mod.Shape.can_drop));
+    try testing.expectEqual(15, @intFromEnum(cursor_mod.Shape.vsplit));
+    try testing.expectEqual(16, @intFromEnum(cursor_mod.Shape.hsplit));
 
     try testing.expectEqual(0, @intFromEnum(backend.WindowState.iconified));
     try testing.expectEqual(1, @intFromEnum(backend.WindowState.maximized));

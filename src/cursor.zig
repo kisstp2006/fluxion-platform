@@ -2,16 +2,18 @@
 
 //! What the pointer looks like, and where it is allowed to go.
 //!
-//! Four modes, and the difference between them is the difference between a
+//! Five modes, and the difference between them is the difference between a
 //! program that has a cursor and a game that has a camera:
 //!
-//!   `normal`    the ordinary arrow, free to leave the window
-//!   `hidden`    invisible over the window, and still free to leave
-//!   `captured`  visible, but confined to the content area
-//!   `disabled`  invisible, confined, and reporting motion with no edges
+//!   `normal`           the ordinary arrow, free to leave the window
+//!   `hidden`           invisible over the window, and still free to leave
+//!   `captured`         visible, but confined to the content area
+//!   `confined_hidden`  confined and invisible, and still has a position
+//!   `disabled`         invisible, confined, and reporting motion with no edges
 //!
 //! **`disabled` is the one a first-person camera needs**, and it is not just
-//! `hidden` plus `captured`. A confined cursor still stops at the edge of the
+//! `hidden` plus `captured` - that pair is `confined_hidden`, the one to draw
+//! a pointer of your own with. A confined cursor stops at the edge of the
 //! window, so a fast turn runs out of screen and the camera stops with it. In
 //! `disabled` the pointer is taken out of the picture entirely: `.cursor`
 //! events carry `dx` and `dy` that keep going in whichever direction the mouse
@@ -43,15 +45,26 @@ pub const Mode = enum {
     /// first-person camera needs, and the only mode where `raw_motion` does
     /// anything.
     disabled,
+    /// Invisible and held, with positions that still mean something: a
+    /// `.cursor` event's `x` and `y` are where the pointer is, and it stops at
+    /// the edges rather than turning forever. For a strategy game that draws
+    /// its own pointer and scrolls at the screen edge.
+    confined_hidden,
 
     /// Is the pointer confined to the window in this mode?
     pub fn confines(self: Mode) bool {
-        return self == .captured or self == .disabled;
+        return switch (self) {
+            .captured, .disabled, .confined_hidden => true,
+            .normal, .hidden => false,
+        };
     }
 
     /// Is it invisible in this mode?
     pub fn hides(self: Mode) bool {
-        return self == .hidden or self == .disabled;
+        return switch (self) {
+            .hidden, .disabled, .confined_hidden => true,
+            .normal, .captured => false,
+        };
     }
 };
 
@@ -81,12 +94,26 @@ pub const Shape = enum {
     resize_all,
     /// The circle-and-bar: this is not somewhere the thing can be dropped.
     not_allowed,
+    /// The hourglass: the program is busy and will not answer.
+    wait,
+    /// The arrow with an hourglass beside it: working, but still usable.
+    busy,
+    /// The question mark, for a control that explains itself when clicked.
+    help,
+    /// Something is being dragged: the closed hand.
+    drag,
+    /// And here it can be dropped.
+    can_drop,
+    /// The handle between two rows, dragged up and down.
+    vsplit,
+    /// The handle between two columns, dragged left and right.
+    hsplit,
 
-    /// The two diagonals and the two axes are the ones a system may not have.
-    /// `arrow` is the fallback, and every platform has that.
+    /// Shapes a system may not have, where `arrow` is what to draw instead.
+    /// Every platform has the rest.
     pub fn optional(self: Shape) bool {
         return switch (self) {
-            .resize_nwse, .resize_nesw, .not_allowed => true,
+            .resize_nwse, .resize_nesw, .not_allowed, .can_drop => true,
             else => false,
         };
     }
@@ -111,22 +138,24 @@ test "the modes say what they do" {
     // takes it away, and only the second is any use for a camera.
     try testing.expect(Mode.captured.confines());
     try testing.expect(Mode.disabled.confines());
+    try testing.expect(Mode.confined_hidden.confines());
     try testing.expect(!Mode.normal.confines());
     try testing.expect(!Mode.hidden.confines());
 
     try testing.expect(Mode.hidden.hides());
     try testing.expect(Mode.disabled.hides());
+    try testing.expect(Mode.confined_hidden.hides());
     try testing.expect(!Mode.normal.hides());
     try testing.expect(!Mode.captured.hides());
 }
 
-test "disabled is the only mode that both hides and confines" {
+test "two modes hide and confine, and the one for a camera is the one with no position" {
     var both: usize = 0;
     inline for (@typeInfo(Mode).@"enum".fields) |field| {
         const mode: Mode = @enumFromInt(field.value);
         if (mode.hides() and mode.confines()) both += 1;
     }
-    try testing.expectEqual(@as(usize, 1), both);
+    try testing.expectEqual(@as(usize, 2), both);
 }
 
 test "the shapes a system may not have are named" {
@@ -136,8 +165,11 @@ test "the shapes a system may not have are named" {
     try testing.expect(!Shape.ibeam.optional());
     try testing.expect(!Shape.pointing_hand.optional());
     try testing.expect(!Shape.resize_ew.optional());
+    try testing.expect(!Shape.wait.optional());
+    try testing.expect(!Shape.vsplit.optional());
     try testing.expect(Shape.resize_nwse.optional());
     try testing.expect(Shape.not_allowed.optional());
+    try testing.expect(Shape.can_drop.optional());
 }
 
 test "the defaults are what a window starts as" {

@@ -417,7 +417,9 @@ pub fn monitor(self: Window) ?usize {
 ///
 /// `.disabled` is the one a first-person camera needs: from then on the
 /// `.cursor` events carry `dx` and `dy` that keep going in whichever direction
-/// the mouse moved, and `x` and `y` stop meaning anything. See `cursor.Mode`.
+/// the mouse moved, and `x` and `y` stop meaning anything. `.confined_hidden`
+/// is the other half of that pair - held and unseen, but still somewhere - for
+/// a program that draws its own pointer. See `cursor.Mode`.
 pub fn setCursorMode(self: Window, mode: cursor.Mode) Error!void {
     const e = self.ctx.entry(self.id) orelse return error.Unavailable;
     try self.ctx.vtable.setCursorMode(self.ctx.impl, e.native, mode);
@@ -461,8 +463,8 @@ pub fn setCursorPos(self: Window, x: f64, y: f64) Error!void {
 
 /// Use one of the system's own cursor shapes over this window.
 ///
-/// `error.Unavailable` for a shape this system has not got - the diagonal
-/// resize arrows are the ones most likely to be missing. `arrow` is everywhere.
+/// `error.Unavailable` for a shape this system has not got - `Shape.optional()`
+/// names those, and `arrow`, which is everywhere, is what to use instead.
 pub fn setCursorShape(self: Window, shape: cursor.Shape) Error!void {
     const e = self.ctx.entry(self.id) orelse return error.Unavailable;
     return self.ctx.vtable.setCursorShape(self.ctx.impl, e.native, shape);

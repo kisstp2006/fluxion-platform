@@ -179,7 +179,7 @@ wants.
 
 ## The cursor is what makes a camera possible
 
-Four modes, and the difference between two of them is the difference between
+Five modes, and the difference between two of them is the difference between
 a program with a cursor and a game with a camera:
 
 ```zig
@@ -188,10 +188,17 @@ _ = win.setRawMouseMotion(true);    // and not through pointer acceleration
 ```
 
 `captured` keeps a visible cursor inside the window, which is what a strategy
-game wants. `disabled` takes the pointer out of the picture entirely: the
-`.cursor` events carry `dx` and `dy` that keep going however far the mouse
-moves, and `x` and `y` stop meaning anything. Without it a fast turn runs out
-of screen and the camera stops with it.
+game wants, and `confined_hidden` is the same with the system's cursor turned
+off, for a program that draws its own. `disabled` takes the pointer out of the
+picture entirely: the `.cursor` events carry `dx` and `dy` that keep going
+however far the mouse moves, and `x` and `y` stop meaning anything. Without it
+a fast turn runs out of screen and the camera stops with it.
+
+`setCursorShape` names one of the system's own shapes - the arrow, the I-beam,
+the resize arrows, wait and busy, help, drag and can_drop, the two split
+handles. `Shape.optional()` says which ones a system may not have, and `arrow`
+is what to draw instead: the diagonal resize arrows and "no entry" are missing
+from X11's core cursor font, and Windows has nothing for `can_drop`.
 
 `setRawMouseMotion` returns whether it was granted rather than assuming.
 Acceleration is a curve meant to help a cursor land on a button and is exactly
@@ -714,9 +721,10 @@ module's memory afterwards. `platform.canvas(win.native())` is the element
 behind a window, for a WebGPU binding that wants to make a surface from it.
 
 **What a page cannot do is refused by name**, as everywhere else: there is no
-screen position to read or set, nothing to iconify, no visible pointer held
-inside an element (`.captured`), no warping the pointer, no display mode to
-switch (`.exclusive`), and no Vulkan. The rest maps onto the page: a title is
+screen position to read or set, nothing to iconify, no pointer held inside an
+element that still has a position (`.captured` and `.confined_hidden`, since a
+lock is the only confinement a page has), no warping the pointer, no display
+mode to switch (`.exclusive`), and no Vulkan. The rest maps onto the page: a title is
 `document.title`, maximised is filling the page, sizes are CSS pixels and the
 framebuffer is device pixels, the scale is `devicePixelRatio` and changes when
 the page is zoomed.

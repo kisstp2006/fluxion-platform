@@ -312,10 +312,13 @@ const XColor = extern struct {
 const xc_x_cursor: c_uint = 0;
 const xc_crosshair: c_uint = 34;
 const xc_fleur: c_uint = 52;
+const xc_hand1: c_uint = 58;
 const xc_hand2: c_uint = 60;
 const xc_left_ptr: c_uint = 68;
+const xc_question_arrow: c_uint = 92;
 const xc_sb_h_double_arrow: c_uint = 108;
 const xc_sb_v_double_arrow: c_uint = 116;
+const xc_watch: c_uint = 150;
 const xc_xterm: c_uint = 152;
 
 /// `XGrabPointer` modes and the mask it wants.
@@ -1374,10 +1377,14 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
         .ibeam => xc_xterm,
         .crosshair => xc_crosshair,
         .pointing_hand => xc_hand2,
-        .resize_ew => xc_sb_h_double_arrow,
-        .resize_ns => xc_sb_v_double_arrow,
-        .resize_all => xc_fleur,
+        .resize_ew, .hsplit => xc_sb_h_double_arrow,
+        .resize_ns, .vsplit => xc_sb_v_double_arrow,
+        .resize_all, .drag => xc_fleur,
         .not_allowed => xc_x_cursor,
+        // The font has no arrow with a watch beside it, so busy is the watch.
+        .wait, .busy => xc_watch,
+        .help => xc_question_arrow,
+        .can_drop => xc_hand1,
         .resize_nwse, .resize_nesw => return error.Unavailable,
     };
 
@@ -1393,9 +1400,10 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
     }
 }
 
-/// A disabled window in the background has let go, and shows the pointer.
+/// A window that has let go - a confining mode in the background - shows the
+/// pointer again.
 fn pointerHidden(win: *const Native) bool {
-    return win.mode == .hidden or (win.mode == .disabled and win.held);
+    return win.mode.hides() and (win.mode == .hidden or win.held);
 }
 
 fn applyCursor(self: *Impl, win: *Native) void {
@@ -1458,8 +1466,9 @@ fn hold(self: *Impl, win: *Native) bool {
     if (win.mode == .disabled) {
         win.saved_x = @intFromFloat(win.last_x);
         win.saved_y = @intFromFloat(win.last_y);
-        if (win.blank == 0) win.blank = blankCursor(self, win.window);
     }
+    // The grab below carries the cursor the pointer will wear while it lasts.
+    if (win.mode.hides() and win.blank == 0) win.blank = blankCursor(self, win.window);
     // A grab is the only way X11 confines a pointer: there is no clip
     // rectangle, so the window takes every pointer event and the pointer
     // stops being able to reach anything else.
@@ -3293,6 +3302,31 @@ test "a key sent to the window comes back out as text" {
     const typed = saw_char orelse return error.TestUnexpectedResult;
     try testing.expect(typed >= 0x20);
     try testing.expect(typed != 0x7F);
+}
+
+test "the core cursor font has the new shapes, and still has no diagonals" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const native = try vtable.createWindow(impl, testing.allocator, @enumFromInt(10), .{
+        .title = "fluxion-platform cursor test",
+        .width = 320,
+        .height = 240,
+        .resizable = true,
+        .decorated = true,
+        .visible = false,
+        .maximized = false,
+        .gl = null,
+    });
+    defer vtable.destroyWindow(impl, testing.allocator, native);
+
+    try vtable.setCursorShape(impl, native, .wait);
+    try vtable.setCursorShape(impl, native, .busy);
+    try vtable.setCursorShape(impl, native, .help);
+    try vtable.setCursorShape(impl, native, .drag);
+    try vtable.setCursorShape(impl, native, .can_drop);
+    try vtable.setCursorShape(impl, native, .vsplit);
+    try vtable.setCursorShape(impl, native, .hsplit);
+    try testing.expectError(error.Unavailable, vtable.setCursorShape(impl, native, .resize_nwse));
 }
 
 test "a second click soon and near is a double click, by the server's clock" {

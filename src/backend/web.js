@@ -86,7 +86,7 @@ const DIALOG = { multiple: 1, folder: 2 };
 
 /// `backend.WindowState` and `cursor.Mode`, by number.
 const STATE = { iconified: 0, maximized: 1, restored: 2, focused: 3, attention: 4 };
-const MODE = { normal: 0, hidden: 1, captured: 2, disabled: 3 };
+const MODE = { normal: 0, hidden: 1, captured: 2, disabled: 3, confinedHidden: 4 };
 
 /// `cursor.Shape`, in order, as the CSS cursors that draw them.
 const SHAPES = [
@@ -100,6 +100,13 @@ const SHAPES = [
   "nesw-resize",
   "move",
   "not-allowed",
+  "wait",
+  "progress",
+  "help",
+  "grabbing",
+  "copy",
+  "row-resize",
+  "col-resize",
 ];
 
 /// `MouseEvent.buttons` is a bitmask, and `MouseEvent.button` a number, and
@@ -597,9 +604,10 @@ export class Platform {
 
         setCursorMode: (handle, mode) => {
           const win = self.windows.get(handle);
-          // A visible pointer held inside an element is the one thing here no
-          // browser can do.
-          if (!win || mode === MODE.captured) return 0;
+          // A pointer held inside an element while it still has a position is
+          // the one thing here no browser can do, seen or unseen: a lock is
+          // the only confinement, and it takes the position away.
+          if (!win || mode === MODE.captured || mode === MODE.confinedHidden) return 0;
           win.mode = mode;
           if (mode === MODE.disabled) {
             if (document.pointerLockElement !== win.canvas) self.lock(win);

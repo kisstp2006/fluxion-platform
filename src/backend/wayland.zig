@@ -255,20 +255,32 @@ const WaylandCursor = struct {
     wl_cursor_image_get_buffer: *const fn (*WlCursorImage) callconv(.c) ?*Proxy,
 };
 
-/// The names the freedesktop cursor themes use. Not every theme has every one,
-/// and `wl_cursor_theme_get_cursor` says so by answering null.
-fn themeName(shape: cursor_mod.Shape) [*:0]const u8 {
+/// What the freedesktop cursor themes call each shape, best first.
+///
+/// A list rather than a name because themes disagree: the X11 names are what
+/// an older one has, the CSS names what a newer one does, and Adwaita has
+/// `progress` where the X11 world says `left_ptr_watch`. Whichever the theme
+/// actually carries is the one used, and `wl_cursor_theme_get_cursor` says
+/// which by answering null for the rest.
+fn themeNames(shape: cursor_mod.Shape) []const [*:0]const u8 {
     return switch (shape) {
-        .arrow => "left_ptr",
-        .ibeam => "xterm",
-        .crosshair => "crosshair",
-        .pointing_hand => "hand2",
-        .resize_ew => "sb_h_double_arrow",
-        .resize_ns => "sb_v_double_arrow",
-        .resize_nwse => "bottom_right_corner",
-        .resize_nesw => "bottom_left_corner",
-        .resize_all => "fleur",
-        .not_allowed => "crossed_circle",
+        .arrow => &.{ "left_ptr", "default", "arrow" },
+        .ibeam => &.{ "xterm", "text", "ibeam" },
+        .crosshair => &.{ "crosshair", "cross", "tcross" },
+        .pointing_hand => &.{ "hand2", "pointer", "hand" },
+        .resize_ew => &.{ "sb_h_double_arrow", "ew-resize", "h_double_arrow" },
+        .resize_ns => &.{ "sb_v_double_arrow", "ns-resize", "v_double_arrow" },
+        .resize_nwse => &.{ "bottom_right_corner", "nwse-resize", "size_fdiag", "bd_double_arrow" },
+        .resize_nesw => &.{ "bottom_left_corner", "nesw-resize", "size_bdiag", "fd_double_arrow" },
+        .resize_all => &.{ "fleur", "move", "all-scroll", "size_all" },
+        .not_allowed => &.{ "crossed_circle", "not-allowed", "forbidden", "no-drop" },
+        .wait => &.{ "watch", "wait" },
+        .busy => &.{ "left_ptr_watch", "progress", "half-busy" },
+        .help => &.{ "question_arrow", "help", "whats_this" },
+        .drag => &.{ "grabbing", "closedhand", "dnd-move", "fleur" },
+        .can_drop => &.{ "dnd-copy", "copy", "hand1" },
+        .vsplit => &.{ "sb_v_double_arrow", "row-resize", "split_v" },
+        .hsplit => &.{ "sb_h_double_arrow", "col-resize", "split_h" },
     };
 }
 
@@ -457,7 +469,8 @@ fn buildPointerInterfaces(core: CoreInterfaces) void {
         .version = 1,
         .method_count = confined_requests.len,
         .methods = &confined_requests,
-        // `confined` and `unconfined`, neither of which this backend acts on.
+        // `confined` and `unconfined`, which are `locked` and `unlocked` by
+        // another name: the same signature, in the same order.
         .event_count = 2,
         .events = &locked_events,
     };
@@ -1099,6 +1112,15 @@ fn loadCursorTheme(self: *Impl) void {
     );
 }
 
+/// The first of a shape's names this theme has an image for.
+fn themeCursor(wc: WaylandCursor, theme: *WlCursorTheme, shape: cursor_mod.Shape) ?*WlCursor {
+    for (themeNames(shape)) |name| {
+        const found = wc.wl_cursor_theme_get_cursor(theme, name) orelse continue;
+        if (found.image_count > 0) return found;
+    }
+    return null;
+}
+
 /// Put a themed image on the cursor surface and hand it to the compositor.
 fn showThemeCursor(self: *Impl, shape: cursor_mod.Shape) bool {
     const wc = self.wc orelse return false;
@@ -1106,9 +1128,7 @@ fn showThemeCursor(self: *Impl, shape: cursor_mod.Shape) bool {
     const surface = self.cursor_surface orelse return false;
     const pointer = self.pointer orelse return false;
 
-    const found = wc.wl_cursor_theme_get_cursor(theme, themeName(shape)) orelse return false;
-    if (found.image_count == 0) return false;
-
+    const found = themeCursor(wc, theme, shape) orelse return false;
     const image = found.images[0];
     const buffer = wc.wl_cursor_image_get_buffer(image) orelse return false;
 
@@ -1148,9 +1168,9 @@ fn hidePointer(self: *Impl) void {
     _ = self.w.wl_display_flush(self.display);
 }
 
-/// A disabled window whose lock is not in force shows the pointer passing over it.
+/// A window whose constraint is not in force shows the pointer passing over it.
 fn pointerHidden(win: *const Native) bool {
-    return win.mode == .hidden or (win.mode == .disabled and win.held);
+    return win.mode.hides() and (win.mode == .hidden or win.held);
 }
 
 const LockedListener = extern struct {
@@ -1158,26 +1178,28 @@ const LockedListener = extern struct {
     unlocked: *const fn (?*anyopaque, *Proxy) callconv(.c) void,
 };
 
-const locked_listener: LockedListener = .{ .locked = onLocked, .unlocked = onUnlocked };
+/// Both constraints send the same two events - `locked`/`unlocked` and
+/// `confined`/`unconfined` - so one listener serves them.
+const constraint_listener: LockedListener = .{ .locked = onConstrained, .unlocked = onUnconstrained };
 
-/// A persistent lock is the compositor's to switch on and off with focus.
-fn onLocked(data: ?*anyopaque, proxy: *Proxy) callconv(.c) void {
+/// A persistent constraint is the compositor's to switch on and off with focus.
+fn onConstrained(data: ?*anyopaque, proxy: *Proxy) callconv(.c) void {
     const self: *Impl = @ptrCast(@alignCast(data.?));
-    const native = findByLock(self, proxy) orelse return;
+    const native = findByConstraint(self, proxy) orelse return;
     native.held = true;
-    if (self.pointer_focus == native) hidePointer(self);
+    if (self.pointer_focus == native and pointerHidden(native)) hidePointer(self);
 }
 
-fn onUnlocked(data: ?*anyopaque, proxy: *Proxy) callconv(.c) void {
+fn onUnconstrained(data: ?*anyopaque, proxy: *Proxy) callconv(.c) void {
     const self: *Impl = @ptrCast(@alignCast(data.?));
-    const native = findByLock(self, proxy) orelse return;
+    const native = findByConstraint(self, proxy) orelse return;
     native.held = false;
-    if (self.pointer_focus == native) _ = showThemeCursor(self, native.shape);
+    if (self.pointer_focus == native and !pointerHidden(native)) _ = showThemeCursor(self, native.shape);
 }
 
-fn findByLock(self: *Impl, proxy: *Proxy) ?*Native {
+fn findByConstraint(self: *Impl, proxy: *Proxy) ?*Native {
     for (self.windows.values()) |native| {
-        if (native.locked == proxy) return native;
+        if (native.locked == proxy or native.confined == proxy) return native;
     }
     return null;
 }
@@ -1253,7 +1275,7 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
             1,
             &args,
         );
-        if (win.locked) |proxy| _ = self.w.wl_proxy_add_listener(proxy, &locked_listener, self);
+        if (win.locked) |proxy| _ = self.w.wl_proxy_add_listener(proxy, &constraint_listener, self);
 
         // The lock stops the pointer moving; the relative pointer is what
         // still reports the hand. Without both, a disabled cursor is a frozen
@@ -1281,6 +1303,9 @@ fn setCursorMode(impl: backend.Impl, native: backend.NativeWindow, mode: cursor_
             1,
             &args,
         );
+        // A hidden confined pointer has to know when the confinement is
+        // actually in force, or it would be invisible over another window.
+        if (win.confined) |proxy| _ = self.w.wl_proxy_add_listener(proxy, &constraint_listener, self);
     }
 
     _ = self.w.wl_display_flush(self.display);
@@ -3510,6 +3535,19 @@ test "the compositor maximising and restoring the window comes out as events" {
     onToplevelConfigure(&self, toplevel, 0, 0, &none);
     try testing.expectEqual(event.Event{ .maximize = .{ .window = native.id, .value = false } }, queue.next().?);
     try testing.expectEqual(@as(?event.Event, null), queue.next());
+}
+
+test "every shape has theme names, old and new, with the best first" {
+    inline for (@typeInfo(cursor_mod.Shape).@"enum".fields) |field| {
+        const shape: cursor_mod.Shape = @enumFromInt(field.value);
+        const names = themeNames(shape);
+        try testing.expect(names.len > 0);
+        for (names) |name| try testing.expect(std.mem.span(name).len > 0);
+    }
+    try testing.expectEqualStrings("sb_v_double_arrow", std.mem.span(themeNames(.vsplit)[0]));
+    // Adwaita has neither of the X11 names for these two.
+    try testing.expectEqualStrings("progress", std.mem.span(themeNames(.busy)[1]));
+    try testing.expectEqualStrings("not-allowed", std.mem.span(themeNames(.not_allowed)[1]));
 }
 
 test "a second click soon and near is a double click, by the compositor's clock" {
