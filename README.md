@@ -185,7 +185,10 @@ rotation moves the notch to the side - and `.safe_area` says when.
 Android the numbers come from `FluxionActivity`, so an app whose manifest
 names `android.app.NativeActivity` instead hears nothing and reads zero; on a
 page they are `env(safe-area-inset-*)`, which a browser only reports to a page
-whose viewport meta tag says `viewport-fit=cover`.
+whose viewport meta tag says `viewport-fit=cover` - `examples/web/index.html`
+has that line - and which are the page's edges in the canvas's pixels: exact
+for a canvas that fills the page, and more than one with a header above it
+needs.
 
 **`win.setIcon` takes every size at once**, because a system picks one per
 place - Windows wants a small one for the title bar and a large one for

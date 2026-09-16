@@ -558,6 +558,10 @@ fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: curso
 /// `env(safe-area-inset-*)`, which is what a phone's browser reports for a
 /// notch and a home bar - and which is zero unless the page asked for
 /// `viewport-fit=cover` in its viewport meta tag.
+///
+/// The page's edges, in this canvas's pixels: exact for a canvas that fills
+/// the page, which is what a game's does, and more than a canvas with the
+/// page's own chrome above it actually needs.
 fn safeArea(impl: backend.Impl, native: backend.NativeWindow) insets_mod.Insets {
     _ = impl;
     var edges: [4]u32 = @splat(0);

@@ -3,7 +3,13 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- `viewport-fit=cover` is what makes a browser report
+         `env(safe-area-inset-*)`, which is where `win.safeArea()` gets its
+         numbers on a page: without it a phone says nothing and a program lays
+         its interface out under the notch. A game whose canvas fills the page
+         wants exactly this line; this page keeps its own header and footer out
+         of the way with the same values below. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Fluxion Platform</title>
     <style>
       :root {
@@ -37,7 +43,8 @@
         flex-wrap: wrap;
         gap: 12px;
         align-items: center;
-        padding: 10px 16px;
+        padding: max(10px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+                 10px max(16px, env(safe-area-inset-left));
         border-bottom: 1px solid var(--line);
         background: var(--panel);
       }
@@ -73,7 +80,8 @@
       aside .error { color: var(--bad); }
       footer {
         grid-column: 1 / -1;
-        padding: 6px 16px;
+        padding: 6px max(16px, env(safe-area-inset-right))
+                 max(6px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
         border-top: 1px solid var(--line);
         background: var(--panel);
         color: var(--dim);
