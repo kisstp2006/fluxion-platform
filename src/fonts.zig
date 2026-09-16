@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSL-1.0
 
-//! The font the system draws its own interface in, as a file a font library
-//! can open.
+//! The fonts the system draws its own interface and its own code in, as files
+//! a font library can open.
 //!
 //! ```zig
 //! const face = try platform.fonts.systemUi(gpa, io);
 //! defer face.deinit(gpa);
+//! const code = try platform.fonts.systemMono(gpa, io);
+//! defer code.deinit(gpa);
 //! ```
 //!
 //! Asked of the system rather than guessed from a list of paths: Segoe UI is
@@ -53,6 +55,21 @@ pub fn systemUi(gpa: Allocator, io: std.Io) Error!Face {
     }
 }
 
+/// The monospaced face the system sets code and terminals in: Cascadia Mono
+/// where Windows has it - it is what Windows Terminal draws in - and Consolas
+/// where it has not; SF Mono or Menlo on a Mac; what fontconfig makes of
+/// `monospace` on Linux; and Android's own `monospace`, Droid Sans Mono.
+pub fn systemMono(gpa: Allocator, io: std.Io) Error!Face {
+    if (comptime !available) return error.Unsupported;
+    if (comptime builtin.os.tag == .windows) return windows.systemMono(gpa);
+    if (comptime builtin.abi.isAndroid()) return firstThere(gpa, io, &android_mono_files);
+    if (comptime builtin.os.tag == .macos) return firstThere(gpa, io, &apple_mono_files);
+    if (fontconfig.match(gpa, "monospace")) |face| return face else |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return firstThere(gpa, io, &linux_mono_files),
+    }
+}
+
 const Known = struct { path: []const u8, index: u32 = 0 };
 
 const android_files = [_]Known{
@@ -77,6 +94,31 @@ const linux_files = [_]Known{
     .{ .path = "/usr/share/fonts/google-noto/NotoSans-Regular.ttf" },
     .{ .path = "/usr/share/fonts/noto/NotoSans-Regular.ttf" },
     .{ .path = "/usr/share/fonts/liberation/LiberationSans-Regular.ttf" },
+};
+
+/// What the system's `monospace` family is on Android: `fonts.xml` names Droid
+/// Sans Mono, and Cutive Mono is the serif one beside it.
+const android_mono_files = [_]Known{
+    .{ .path = "/system/fonts/DroidSansMono.ttf" },
+    .{ .path = "/system/fonts/NotoSansMono-Regular.ttf" },
+    .{ .path = "/system/fonts/CutiveMono.ttf" },
+};
+
+/// Menlo's collection holds regular, bold, italic and bold italic, in that order.
+const apple_mono_files = [_]Known{
+    .{ .path = "/System/Library/Fonts/SFNSMono.ttf" },
+    .{ .path = "/System/Library/Fonts/Menlo.ttc", .index = 0 },
+    .{ .path = "/System/Library/Fonts/Monaco.ttf" },
+};
+
+const linux_mono_files = [_]Known{
+    .{ .path = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf" },
+    .{ .path = "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf" },
+    .{ .path = "/usr/share/fonts/TTF/DejaVuSansMono.ttf" },
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/google-noto/NotoSansMono-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/noto/NotoSansMono-Regular.ttf" },
+    .{ .path = "/usr/share/fonts/liberation/LiberationMono-Regular.ttf" },
 };
 
 fn firstThere(gpa: Allocator, io: std.Io, files: []const Known) Error!Face {
@@ -163,6 +205,18 @@ const windows = struct {
         return byName(gpa, name_bytes[0..len]);
     }
 
+    /// Cascadia Mono came with Windows 11 and Windows Terminal; Consolas has
+    /// been there since Vista, and Courier New since before either.
+    fn systemMono(gpa: Allocator) Error!Face {
+        for ([_][]const u8{ "Cascadia Mono", "Consolas", "Courier New" }) |family| {
+            if (byName(gpa, family)) |face| return face else |err| switch (err) {
+                error.NotFound => continue,
+                else => return err,
+            }
+        }
+        return error.NotFound;
+    }
+
     /// Through the registry's list of installed fonts, which is what maps a
     /// family to its file - the machine's first, then the user's own.
     fn byName(gpa: Allocator, family: []const u8) Error!Face {
@@ -229,9 +283,21 @@ fn faceIndex(listed: []const u8, family: []const u8) ?u32 {
     var parts = std.mem.splitSequence(u8, names, " & ");
     var index: u32 = 0;
     while (parts.next()) |part| : (index += 1) {
-        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, part, " "), family)) return index;
+        if (sameFamily(std.mem.trim(u8, part, " "), family)) return index;
     }
     return null;
+}
+
+/// The family itself, or its regular face named as one: a font whose weights
+/// are all in one variable file - Cascadia Mono - is listed as
+/// `"Cascadia Mono Regular"`, where a family of separate files lists its
+/// regular face by the family's name alone.
+fn sameFamily(name: []const u8, family: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(name, family)) return true;
+    const regular = " Regular";
+    return name.len == family.len + regular.len and
+        std.ascii.startsWithIgnoreCase(name, family) and
+        std.ascii.endsWithIgnoreCase(name, regular);
 }
 
 // -------------------------------------------------------------------------
@@ -288,12 +354,25 @@ test "a registry entry names one font or a collection of them, in file order" {
     try testing.expectEqual(@as(?u32, 1), faceIndex("Microsoft YaHei & Microsoft YaHei UI (TrueType)", "Microsoft YaHei UI"));
     try testing.expectEqual(@as(?u32, 0), faceIndex("Microsoft YaHei & Microsoft YaHei UI (TrueType)", "microsoft yahei"));
     try testing.expectEqual(@as(?u32, 0), faceIndex("Cascadia Code (OpenType)", "Cascadia Code"));
+    try testing.expectEqual(@as(?u32, 0), faceIndex("Cascadia Mono Regular (TrueType)", "Cascadia Mono"));
+    try testing.expectEqual(@as(?u32, null), faceIndex("Consolas Bold (TrueType)", "Consolas"));
+    try testing.expectEqual(@as(?u32, null), faceIndex("Cascadia Mono PL Regular (TrueType)", "Cascadia Mono"));
     try testing.expectEqual(@as(?u32, 0), faceIndex("My Font", "My Font"));
 }
 
 test "the Windows metrics are the size Windows says they are" {
     try testing.expectEqual(@as(usize, 92), @sizeOf(windows.LogFont));
     try testing.expectEqual(@as(usize, 504), @sizeOf(windows.NonClientMetrics));
+}
+
+test "the code font is a file that is there" {
+    if (!available or builtin.abi.isAndroid()) return error.SkipZigTest;
+    const face = systemMono(testing.allocator, testing.io) catch |err| switch (err) {
+        error.NotFound => return error.SkipZigTest,
+        else => return err,
+    };
+    defer face.deinit(testing.allocator);
+    try std.Io.Dir.cwd().access(testing.io, face.path, .{});
 }
 
 test "the interface font is a file that is there" {

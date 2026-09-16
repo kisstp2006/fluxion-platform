@@ -10,7 +10,9 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `event` | Everything that can happen, as one tagged union. |
 | `keys` | What a key is, what a button is, and what was held down at the time. |
 | `input` | What is held down right now, kept up to date as events go past. |
-| `cursor` | Where the pointer may go, and whether it can be seen. |
+| `cursor` | Where the pointer may go, whether it can be seen, and what it looks like. |
+| `icon` | The picture beside a window's name, in every size a system might ask for. |
+| `insets` | The edges of a window a phone draws over: the notch, the gesture bar. |
 | `monitor` | The displays attached, what each can do, and how a window fills one. |
 | `gamepad` | Controllers: what is plugged in, what it is doing, and how to read an unfamiliar one. |
 | `gl` | Asking a window for an OpenGL context, and driving the one it gives back. |
@@ -19,7 +21,7 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `dialog` | Asking the user for files or a folder, in the system's own dialog. |
 | `trash` | A file or a folder moved to the system's trash, where the user can take it back from. No window needed. |
 | `folders` | Home, documents, and where a program keeps its settings, its data and its cache - the system's own answer. |
-| `fonts` | The font the system draws its own interface in, as a file a font library can open. |
+| `fonts` | The fonts the system draws its own interface and its own code in, as files a font library can open. |
 | `shell` | A file, a folder or an address handed to the system: opened, or shown in the file manager. |
 | `web` | What a browser build needs and `std` cannot give it: a console, a panic that says what it was, and the bytes of a dropped file. |
 | `backend` | What a windowing system has to answer to — the seam a new backend is written against. |
@@ -489,6 +491,7 @@ before anything is tried.
 ```zig
 const settings = try platform.folders.path(gpa, io, .config);   // %APPDATA%, ~/.config
 const face = try platform.fonts.systemUi(gpa, io);              // Segoe UI, what fontconfig picks
+const code = try platform.fonts.systemMono(gpa, io);            // Cascadia Mono, DejaVu Sans Mono
 try platform.shell.showInFolder(gpa, io, "C:/game/art/hero.png");
 try platform.shell.openUrl(gpa, io, "https://ziglang.org/");
 ```
@@ -506,18 +509,21 @@ for a collection, which face in it: the message font Windows is set to, found
 in the registry's list of installed fonts; what fontconfig makes of
 `sans-serif`; Roboto on a phone. A face inside a collection comes back as
 the file and its index - Microsoft YaHei UI is the second face of `msyh.ttc`.
+**`fonts.systemMono` is the one code and terminals are set in**: Cascadia
+Mono where Windows has it and Consolas where it has not, what fontconfig makes
+of `monospace`, SF Mono or Menlo on a Mac, Droid Sans Mono on a phone.
 
 **`shell` says what went wrong**, where starting `explorer` or `xdg-open` and
 hoping says nothing: `error.FileNotFound`, `error.NoHandler` when nothing opens
 that kind of thing, `error.Refused`. `shell.support` says which of the three
 calls a build has.
 
-| | `folders` | `fonts.systemUi` | `shell` |
+| | `folders` | `fonts.systemUi`, `fonts.systemMono` | `shell` |
 | --- | --- | --- | --- |
-| Windows | `SHGetKnownFolderPath`: the roaming profile for config and data, the local one for the cache | `SPI_GETNONCLIENTMETRICS`, then the registry's font list | `ShellExecuteW`; `SHOpenFolderAndSelectItems`, with the file selected |
-| Linux, BSD | the XDG base directories, and `user-dirs.dirs` for documents | fontconfig, loaded when asked; a list of the usual files without it | the portal's `OpenURI` for an address and the file manager's `ShowItems` over D-Bus, then `xdg-open`, whose exit code is read |
-| macOS | `~/Library/Application Support` and `Caches` | San Francisco, then Helvetica | `open`, and `open -R` to show |
-| Android | the app's own storage; documents are the part a file manager sees | Roboto | `openUrl` only, as an `ACTION_VIEW` intent - which also opens the `content://` a file dialog answers with |
+| Windows | `SHGetKnownFolderPath`: the roaming profile for config and data, the local one for the cache | `SPI_GETNONCLIENTMETRICS`, then the registry's font list; Cascadia Mono, else Consolas | `ShellExecuteW`; `SHOpenFolderAndSelectItems`, with the file selected |
+| Linux, BSD | the XDG base directories, and `user-dirs.dirs` for documents | fontconfig's `sans-serif` and `monospace`, loaded when asked; a list of the usual files without it | the portal's `OpenURI` for an address and the file manager's `ShowItems` over D-Bus, then `xdg-open`, whose exit code is read |
+| macOS | `~/Library/Application Support` and `Caches` | San Francisco, then Helvetica; SF Mono, then Menlo | `open`, and `open -R` to show |
+| Android | the app's own storage; documents are the part a file manager sees | Roboto; Droid Sans Mono | `openUrl` only, as an `ACTION_VIEW` intent - which also opens the `content://` a file dialog answers with |
 | web | `error.Unsupported` | `error.Unsupported` | `openUrl` only, in a new tab; `error.Refused` when the popup blocker says no |
 
 ## Drawing: a context, or a surface, and nothing after that
