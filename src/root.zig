@@ -71,6 +71,7 @@ pub const backend = @import("backend.zig");
 pub const input = @import("input.zig");
 pub const cursor = @import("cursor.zig");
 pub const icon = @import("icon.zig");
+pub const insets = @import("insets.zig");
 pub const monitor = @import("monitor.zig");
 pub const gamepad = @import("gamepad.zig");
 pub const gl = @import("gl.zig");
@@ -142,6 +143,9 @@ pub const CursorImage = cursor.Image;
 /// One drawing of a window's icon. See `Window.setIcon`.
 pub const IconImage = icon.Image;
 
+/// The edges of a window the system draws over. See `Window.safeArea`.
+pub const Insets = insets.Insets;
+
 /// One display. See `monitor`.
 pub const Monitor = monitor.Monitor;
 
@@ -184,6 +188,7 @@ test {
     _ = input;
     _ = cursor;
     _ = icon;
+    _ = insets;
     _ = monitor;
     _ = gamepad;
     _ = gl;

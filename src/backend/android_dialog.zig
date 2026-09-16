@@ -37,13 +37,8 @@ pub const answered_signature = "(I[Ljava/lang/String;[Ljava/lang/String;)V";
 /// False for a plain `NativeActivity`, which has no such method - an app
 /// whose manifest does not name `FluxionActivity` simply has no dialog.
 pub fn register(env: jni.JniEnv, activity: jni.JObject, function: *const anyopaque) bool {
-    const class_of = env.*.GetObjectClass orelse return false;
-    const register_natives = env.*.RegisterNatives orelse return false;
-    const class = class_of(env, activity) orelse return false;
     const methods = [_]jni.NativeMethod{.{ .name = "answered", .signature = answered_signature, .function = function }};
-    const ok = register_natives(env, class, &methods, methods.len) == jni.ok;
-    if (jni.threw(env)) return false;
-    return ok;
+    return jni.registerNatives(env, activity, &methods);
 }
 
 /// The activity's two methods, looked up once on its class.

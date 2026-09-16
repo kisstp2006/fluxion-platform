@@ -59,6 +59,7 @@ const keys = @import("../keys.zig");
 const platform = @import("../platform.zig");
 const cursor_mod = @import("../cursor.zig");
 const icon_mod = @import("../icon.zig");
+const insets_mod = @import("../insets.zig");
 
 const Error = platform.Error;
 
@@ -270,6 +271,9 @@ pub const Cmd = enum(u8) {
     config_changed,
     /// A file dialog's answer is in `Glue.answer`.
     dialog_answered,
+    /// The system's own edges moved - a rotation, a bar coming or going - and
+    /// `Glue.insets` holds them.
+    insets_changed,
     _,
 };
 
@@ -286,6 +290,11 @@ pub const Glue = struct {
 
     /// Set by the UI thread just before the command that announces it, and read
     /// by the app thread just after. The pipe between the two is the barrier.
+    /// The system's edges, packed left, top, right, bottom into sixteen bits
+    /// each: one word, so the app thread reads a whole set rather than four
+    /// numbers from two different layouts.
+    insets: std.atomic.Value(u64) = .init(0),
+
     pending_window: std.atomic.Value(usize) = .init(0),
     pending_input: std.atomic.Value(usize) = .init(0),
 
@@ -503,7 +512,14 @@ pub fn nativeActivityOnCreate(
     // Here, on the UI thread, because `onActivityResult` comes on this thread
     // after this returns - even to an activity recreated to hear one.
     if (activity.env) |env| {
-        _ = android_dialog.register(@ptrCast(@alignCast(env)), activity.clazz, &answered);
+        const jni_env: jni.JniEnv = @ptrCast(@alignCast(env));
+        _ = android_dialog.register(jni_env, activity.clazz, &answered);
+        const methods = [_]jni.NativeMethod{.{
+            .name = "insetsChanged",
+            .signature = "(IIII)V",
+            .function = &insetsChanged,
+        }};
+        _ = jni.registerNatives(jni_env, activity.clazz, &methods);
     }
 
     // The app's thread. Everything after this happens on two threads, and the
@@ -575,6 +591,20 @@ fn answered(env: jni.JniEnv, class: jni.JClass, id: i32, names: jni.JObject, uri
     const earlier = glue.answer.swap(@intFromPtr(answer), .acq_rel);
     if (earlier != 0) @as(*android_dialog.Answer, @ptrFromInt(earlier)).destroy();
     glue.writeCmd(.dialog_answered);
+}
+
+/// `FluxionActivity.insetsChanged`, on the UI thread as the layout happens.
+fn insetsChanged(env: jni.JniEnv, class: jni.JClass, left: i32, top: i32, right: i32, bottom: i32) callconv(.c) void {
+    _ = .{ env, class };
+    const edges: insets_mod.Insets = .{
+        .left = @intCast(@max(0, left)),
+        .top = @intCast(@max(0, top)),
+        .right = @intCast(@max(0, right)),
+        .bottom = @intCast(@max(0, bottom)),
+    };
+    const packed_insets = edges.pack();
+    if (glue.insets.swap(packed_insets, .acq_rel) == packed_insets) return;
+    glue.writeCmd(.insets_changed);
 }
 
 /// The activity, while there is one.
@@ -716,6 +746,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
     .setIcon = setIcon,
+    .safeArea = safeArea,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1374,6 +1405,18 @@ fn setIcon(impl: backend.Impl, native: backend.NativeWindow, images: []const ico
     return error.Unavailable;
 }
 
+/// What the notch, the cutout and the gesture bar leave: the numbers
+/// `FluxionActivity` heard at the last layout, in pixels, which is what this
+/// backend reports everything else in.
+///
+/// Zero for an app whose manifest names `android.app.NativeActivity` rather
+/// than `FluxionActivity`: nothing is listening to the insets there, and a
+/// guess would be worse than saying the window is all usable.
+fn safeArea(impl: backend.Impl, native: backend.NativeWindow) insets_mod.Insets {
+    _ = .{ impl, native };
+    return insets_mod.Insets.unpack(glue.insets.load(.acquire));
+}
+
 /// The `ANativeWindow`, which is what an EGL or Vulkan surface is made from.
 ///
 /// Zero while there is none - between `.surface_lost` and the next
@@ -1548,6 +1591,10 @@ pub fn handleCommand(self: *Impl, cmd: Cmd) Error!void {
         .pause, .stop => push(self, .{ .suspended = {} }),
         .low_memory => push(self, .{ .low_memory = {} }),
         .dialog_answered => try answerDialog(self),
+        .insets_changed => push(self, .{ .safe_area = .{
+            .window = id,
+            .insets = insets_mod.Insets.unpack(glue.insets.load(.acquire)),
+        } }),
 
         .destroy => {
             push(self, .{ .close = id });

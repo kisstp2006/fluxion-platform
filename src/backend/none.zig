@@ -19,6 +19,7 @@ const testing = std.testing;
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
 const icon_mod = @import("../icon.zig");
+const insets_mod = @import("../insets.zig");
 const event = @import("../event.zig");
 const input = @import("../input.zig");
 const monitor = @import("../monitor.zig");
@@ -75,6 +76,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
     .setIcon = setIcon,
+    .safeArea = safeArea,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -305,6 +307,12 @@ fn setCursorPos(impl: backend.Impl, native: backend.NativeWindow, x: f64, y: f64
 fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: cursor_mod.Shape) Error!void {
     _ = .{ impl, native, shape };
     return error.Unavailable;
+}
+
+/// Nothing is drawn over a window here, so the whole of it is usable.
+fn safeArea(impl: backend.Impl, native: backend.NativeWindow) insets_mod.Insets {
+    _ = .{ impl, native };
+    return .{};
 }
 
 fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {

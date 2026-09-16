@@ -19,6 +19,7 @@ const testing = std.testing;
 const backend = @import("backend.zig");
 const cursor = @import("cursor.zig");
 const icon = @import("icon.zig");
+const insets = @import("insets.zig");
 const monitor_mod = @import("monitor.zig");
 const gl = @import("gl.zig");
 const vulkan = @import("vulkan.zig");
@@ -498,6 +499,17 @@ pub fn setIcon(self: Window, images: []const icon.Image) Error!void {
         if (!image.valid()) return error.Unavailable;
     }
     return self.ctx.vtable.setIcon(self.ctx.impl, e.native, images);
+}
+
+/// The edges of this window the system draws over, in the framebuffer's
+/// pixels: a phone's notch, its gesture bar, a rounded corner.
+///
+/// Zero on all four everywhere but a phone and a page. They change while the
+/// program runs - a rotation moves the notch - and `.safe_area` says when. See
+/// `insets`.
+pub fn safeArea(self: Window) insets.Insets {
+    const e = self.ctx.entry(self.id) orelse return .{};
+    return self.ctx.vtable.safeArea(self.ctx.impl, e.native);
 }
 
 /// The windowing system's own handle, as a number: an `HWND`, an X11 `Window`,

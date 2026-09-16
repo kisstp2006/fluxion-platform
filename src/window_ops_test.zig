@@ -276,6 +276,22 @@ test "an icon is taken in every size, or the backend says it cannot" {
     }));
 }
 
+test "the safe area is the whole window on a desktop, and never nonsense" {
+    var fixture: Fixture = .{};
+    if (!fixture.open()) return error.SkipZigTest;
+    defer fixture.close();
+
+    const edges = fixture.win.safeArea();
+    const pixels = fixture.win.framebufferSize();
+    // A phone reports a notch and a gesture bar; a desktop reports nothing at
+    // all. Either way what is left has to be a size a program can lay out in.
+    const usable = edges.within(pixels);
+    try testing.expect(usable[2] <= pixels[0] and usable[3] <= pixels[1]);
+    if (platform.supported.len > 0 and fixture.ctx.backend() != .android) {
+        try testing.expect(edges.isEmpty());
+    }
+}
+
 test "a stale window refuses every state call rather than crashing" {
     var ctx = try Context.init(testing.allocator, .{ .select = .{ .only = .none } });
     defer ctx.deinit();
@@ -292,6 +308,7 @@ test "a stale window refuses every state call rather than crashing" {
     try testing.expectError(error.Unavailable, stale.setSizeLimits(.{}));
     try testing.expectError(error.Unavailable, stale.setOpacity(1));
     try testing.expectError(error.Unavailable, stale.setIcon(&.{}));
+    try testing.expect(stale.safeArea().isEmpty());
 
     try testing.expectEqual([2]i32{ 0, 0 }, stale.position());
     try testing.expect(!stale.isIconified());

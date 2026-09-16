@@ -60,6 +60,7 @@ const testing = std.testing;
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
 const icon_mod = @import("../icon.zig");
+const insets_mod = @import("../insets.zig");
 const dialog = @import("../dialog.zig");
 const event = @import("../event.zig");
 const input = @import("../input.zig");
@@ -229,6 +230,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
     .setIcon = setIcon,
+    .safeArea = safeArea,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -551,6 +553,16 @@ fn setCursorPos(impl: backend.Impl, native: backend.NativeWindow, x: f64, y: f64
 fn setCursorShape(impl: backend.Impl, native: backend.NativeWindow, shape: cursor_mod.Shape) Error!void {
     _ = impl;
     if (js.setCursorShape(castWindow(native).handle, @intFromEnum(shape)) == 0) return error.Unavailable;
+}
+
+/// `env(safe-area-inset-*)`, which is what a phone's browser reports for a
+/// notch and a home bar - and which is zero unless the page asked for
+/// `viewport-fit=cover` in its viewport meta tag.
+fn safeArea(impl: backend.Impl, native: backend.NativeWindow) insets_mod.Insets {
+    _ = impl;
+    var edges: [4]u32 = @splat(0);
+    js.safeArea(castWindow(native).handle, &edges);
+    return .{ .left = edges[0], .top = edges[1], .right = edges[2], .bottom = edges[3] };
 }
 
 /// A page's icon is the tab's, and a tab has one: the largest of the list goes
@@ -1009,6 +1021,16 @@ fn translate(self: *Impl, record: *const wire.Record) void {
             } });
         },
 
+        .safe_area => push(self, .{ .safe_area = .{
+            .window = id,
+            .insets = .{
+                .left = @intCast(@max(0, record.a)),
+                .top = @intCast(@max(0, record.b)),
+                .right = @intCast(@max(0, record.c)),
+                .bottom = @intCast(@max(0, record.d)),
+            },
+        } }),
+
         .cursor => push(self, .{ .cursor = .{
             .window = id,
             .x = record.x,
@@ -1457,6 +1479,25 @@ test "a button, the pointer and the wheel come through in the library's terms" {
             // Down is negative here, as on every other backend.
             try testing.expectApproxEqAbs(@as(f64, -1), queue.next().?.scroll.y, 1e-9);
             try testing.expectApproxEqAbs(@as(f64, -1), queue.next().?.scroll.y, 1e-9);
+        }
+    }.run);
+}
+
+test "the page's safe area is read in the drawing buffer's pixels, and a change is an event" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            try testing.expect(vtable.safeArea(impl, native).isEmpty());
+
+            stub.canvasFor(1).?.safe_area = .{ 0, 96, 0, 48 };
+            const edges = vtable.safeArea(impl, native);
+            try testing.expectEqual(@as(u32, 96), edges.top);
+            try testing.expectEqual(@as(u32, 48), edges.bottom);
+
+            stub.queue(.{ .kind = .safe_area, .window = 1, .a = 12, .b = 96, .c = 0, .d = 48 }, "");
+            try vtable.pump(impl, queue);
+            const moved = queue.next().?.safe_area;
+            try testing.expectEqual(insets_mod.Insets{ .left = 12, .top = 96, .bottom = 48 }, moved.insets);
+            try testing.expectEqual(@as(event.WindowId, @enumFromInt(1)), moved.window);
         }
     }.run);
 }

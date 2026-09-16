@@ -63,6 +63,7 @@ const KIND = {
   surfaceCreated: 15,
   dialogBegin: 16,
   dialogFile: 17,
+  safeArea: 18,
 };
 
 /// `Record`: kind, window, a, b, c, d as 32-bit integers from offset 0, then
@@ -326,6 +327,10 @@ class Win {
     this.focused = false;
     this.maximized = false;
     this.unfilled = null;
+
+    /// `env(safe-area-inset-*)` as they were last measured, in the drawing
+    /// buffer's pixels. Null until the first measurement.
+    this.insets = null;
 
     this.mode = MODE.normal;
     this.shape = 0;
@@ -639,6 +644,13 @@ export class Platform {
           win.shape = shape;
           self.applyCursor(win);
           return 1;
+        },
+
+        safeArea: (handle, out) => {
+          const win = self.windows.get(handle);
+          const edges = win ? (win.insets ?? self.measureSafeArea(win)) : [0, 0, 0, 0];
+          const at = out >>> 0;
+          for (let i = 0; i < 4; i++) self.view.setUint32(at + i * 4, edges[i], true);
         },
 
         setIcon: (handle, pixels, len, width, height) => {
@@ -1065,6 +1077,10 @@ export class Platform {
 
     window.addEventListener("focus", () => this.focusChanged(), { signal });
     window.addEventListener("blur", () => this.focusChanged(), { signal });
+    // A turned phone moves its notch to the side, and neither the canvas nor
+    // the page need change size for it.
+    window.addEventListener("resize", () => this.safeAreaChanged(), { signal });
+    window.addEventListener("orientationchange", () => this.safeAreaChanged(), { signal });
     document.addEventListener("paste", (event) => this.pasted(event), { signal });
 
     this.watchScale(signal);
@@ -1324,6 +1340,7 @@ export class Platform {
       this.queue({ kind: KIND.resize, win: win.id, a: sizes[0], b: sizes[1], c: fbWidth, d: fbHeight, x: scale });
     }
     if (win.textInput) this.placeField(win);
+    this.checkSafeArea(win);
   }
 
   /// Fill the page, or give the space back. Maximised, as a page means it.
@@ -1744,6 +1761,64 @@ export class Platform {
       return;
     }
     win.canvas.style.cursor = win.image ?? (SHAPES[win.shape] ?? "default");
+  }
+
+  // -- the edges a phone draws over --
+
+  /// `env(safe-area-inset-*)` for one canvas, in its drawing buffer's pixels.
+  ///
+  /// Measured off a hidden element rather than asked for: there is no call for
+  /// these, only the CSS environment, and a padding is the shortest way to
+  /// read four of them. Zero on a page whose viewport meta tag does not say
+  /// `viewport-fit=cover`, which is what makes a browser report them at all.
+  measureSafeArea(win) {
+    const probe = this.insetProbe ?? this.makeInsetProbe();
+    if (!probe || typeof getComputedStyle !== "function") return [0, 0, 0, 0];
+    const style = getComputedStyle(probe);
+    const [perX, perY] = this.pixelsPerCss(win);
+    const css = (value) => Math.max(0, parseFloat(value) || 0);
+    return [
+      Math.round(css(style.paddingLeft) * perX),
+      Math.round(css(style.paddingTop) * perY),
+      Math.round(css(style.paddingRight) * perX),
+      Math.round(css(style.paddingBottom) * perY),
+    ];
+  }
+
+  makeInsetProbe() {
+    const body = document.body;
+    if (!body) return null;
+    const probe = document.createElement("div");
+    Object.assign(probe.style, {
+      position: "fixed",
+      left: "0",
+      top: "0",
+      width: "0",
+      height: "0",
+      visibility: "hidden",
+      pointerEvents: "none",
+      paddingLeft: "env(safe-area-inset-left, 0px)",
+      paddingTop: "env(safe-area-inset-top, 0px)",
+      paddingRight: "env(safe-area-inset-right, 0px)",
+      paddingBottom: "env(safe-area-inset-bottom, 0px)",
+    });
+    body.appendChild(probe);
+    this.insetProbe = probe;
+    return probe;
+  }
+
+  /// Measure again, and say so where they moved. The first measurement is not
+  /// a change: a program asks for it.
+  checkSafeArea(win) {
+    const now = this.measureSafeArea(win);
+    const before = win.insets;
+    win.insets = now;
+    if (!before || now.every((value, index) => value === before[index])) return;
+    this.queue({ kind: KIND.safeArea, win: win.id, a: now[0], b: now[1], c: now[2], d: now[3] });
+  }
+
+  safeAreaChanged() {
+    for (const win of this.windows.values()) this.checkSafeArea(win);
   }
 
   /// The page's `<link rel="icon">`, made if the page has none.

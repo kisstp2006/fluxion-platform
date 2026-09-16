@@ -56,6 +56,7 @@ const evdev = @import("evdev.zig");
 const virtual_key = @import("virtual_key.zig");
 const cursor_mod = @import("../cursor.zig");
 const icon_mod = @import("../icon.zig");
+const insets_mod = @import("../insets.zig");
 const clipboard = @import("clipboard.zig");
 const linux_dialog = @import("linux_dialog.zig");
 
@@ -943,6 +944,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
     .setIcon = setIcon,
+    .safeArea = safeArea,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1285,6 +1287,12 @@ fn freeCursorImage(self: *Impl, win: *Native) void {
 fn setIcon(impl: backend.Impl, native: backend.NativeWindow, images: []const icon_mod.Image) Error!void {
     _ = .{ impl, native, images };
     return error.Unavailable;
+}
+
+/// Nothing is drawn over a window here, so the whole of it is usable.
+fn safeArea(impl: backend.Impl, native: backend.NativeWindow) insets_mod.Insets {
+    _ = .{ impl, native };
+    return .{};
 }
 
 fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {

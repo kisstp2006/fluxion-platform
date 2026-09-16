@@ -13,10 +13,15 @@ import android.app.NativeActivity;
 import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Insets;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
+import android.view.View;
+import android.view.WindowInsets;
 import android.webkit.MimeTypeMap;
 import java.util.ArrayList;
 
@@ -24,9 +29,56 @@ public class FluxionActivity extends NativeActivity {
     /** Registered by the native library as the activity starts. */
     private static native void answered(int id, String[] names, String[] uris);
 
+    /** The edges the system draws over - a notch, the gesture bar - in pixels. */
+    private static native void insetsChanged(int left, int top, int right, int bottom);
+
     private static final int PICK = 0x464c;
     private int pendingId;
     private boolean pendingFolder;
+
+    /**
+     * The insets are heard here rather than asked for: they arrive at the first
+     * layout and again whenever the phone is turned or the bars come and go,
+     * and a program that polled would miss the change it needs to lay out for.
+     *
+     * `super.onCreate` is what loads the native library and registers
+     * `insetsChanged`, so the listener below can only ever fire after it.
+     */
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        View view = getWindow().getDecorView();
+        view.setOnApplyWindowInsetsListener((v, windowInsets) -> {
+            report(windowInsets);
+            return v.onApplyWindowInsets(windowInsets);
+        });
+    }
+
+    private static void report(WindowInsets windowInsets) {
+        int left;
+        int top;
+        int right;
+        int bottom;
+        if (Build.VERSION.SDK_INT >= 30) {
+            Insets bars = windowInsets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            left = bars.left;
+            top = bars.top;
+            right = bars.right;
+            bottom = bars.bottom;
+        } else {
+            // The old pair, which is the system bars and the cutout together.
+            left = windowInsets.getSystemWindowInsetLeft();
+            top = windowInsets.getSystemWindowInsetTop();
+            right = windowInsets.getSystemWindowInsetRight();
+            bottom = windowInsets.getSystemWindowInsetBottom();
+        }
+        try {
+            insetsChanged(left, top, right, bottom);
+        } catch (UnsatisfiedLinkError e) {
+            // A build whose native library did not register it: no insets, and
+            // no reason to take the activity down over it.
+        }
+    }
 
     /** Open the document picker. Called on the program's thread; started on the UI one. */
     public void openDocuments(int id, boolean folder, boolean multiple, String[] extensions) {

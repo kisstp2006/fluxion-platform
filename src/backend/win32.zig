@@ -29,6 +29,7 @@ const dyn = @import("fluxion_dyn");
 const backend = @import("../backend.zig");
 const cursor_mod = @import("../cursor.zig");
 const icon_mod = @import("../icon.zig");
+const insets_mod = @import("../insets.zig");
 const event = @import("../event.zig");
 const input = @import("../input.zig");
 const monitor = @import("../monitor.zig");
@@ -832,6 +833,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
     .setIcon = setIcon,
+    .safeArea = safeArea,
     .position = position,
     .setPosition = setPosition,
     .setSize = setSize,
@@ -1668,6 +1670,12 @@ fn putIcon(self: *Impl, win: *Native, which: WPARAM, made: ?HCURSOR) void {
     const old = if (which == icon_small) &win.icon_small else &win.icon_big;
     if (old.*) |one| _ = self.u.DestroyIcon(one);
     old.* = made;
+}
+
+/// Nothing is drawn over a window here, so the whole of it is usable.
+fn safeArea(impl: backend.Impl, native: backend.NativeWindow) insets_mod.Insets {
+    _ = .{ impl, native };
+    return .{};
 }
 
 fn setCursorImage(impl: backend.Impl, native: backend.NativeWindow, image: ?cursor_mod.Image) Error!void {

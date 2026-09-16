@@ -177,6 +177,16 @@ entered, the one showing most of an X11 window - and the primary one where the
 system cannot tell. What `setFullscreen(.{ .borderless = win.monitor().? })`
 wants.
 
+**`win.safeArea()` is what a phone draws over**, in the framebuffer's pixels:
+the notch, the cutout, the gesture bar. Zero on all four on every desktop,
+where nothing is drawn over a window. They change while the program runs - a
+rotation moves the notch to the side - and `.safe_area` says when.
+`insets.within(win.framebufferSize())` is the rectangle left to lay out in. On
+Android the numbers come from `FluxionActivity`, so an app whose manifest
+names `android.app.NativeActivity` instead hears nothing and reads zero; on a
+page they are `env(safe-area-inset-*)`, which a browser only reports to a page
+whose viewport meta tag says `viewport-fit=cover`.
+
 **`win.setIcon` takes every size at once**, because a system picks one per
 place - Windows wants a small one for the title bar and a large one for
 alt-tab, X11 hands the lot to the window manager. Straight RGBA, like a

@@ -44,6 +44,8 @@ pub const Canvas = struct {
     /// a test can see what the page was handed. All zero for none.
     cursor_image: [4]u32 = @splat(0),
     cursor_pixel: [4]u8 = @splat(0),
+    /// What the fake page would say its safe-area insets are.
+    safe_area: [4]u32 = @splat(0),
     /// The window's icon: its size, and the first pixel of it. Zero for none.
     icon_size: [2]u32 = @splat(0),
     icon_pixel: [4]u8 = @splat(0),
@@ -343,6 +345,14 @@ pub fn setCursorShape(handle: u32, shape: u32) u32 {
     const slot = canvas(handle) orelse return 0;
     slot.cursor_shape = shape;
     return 1;
+}
+
+pub fn safeArea(handle: u32, out: *[4]u32) void {
+    const slot = canvas(handle) orelse {
+        out.* = @splat(0);
+        return;
+    };
+    out.* = slot.safe_area;
 }
 
 pub fn setIcon(handle: u32, pixels: ?[*]const u8, len: u32, width: u32, height: u32) u32 {

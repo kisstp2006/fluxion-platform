@@ -33,8 +33,10 @@
 //! sends them.
 
 const std = @import("std");
+
 const testing = std.testing;
 
+const insets_mod = @import("insets.zig");
 const keys = @import("keys.zig");
 
 /// Which window an event is about.
@@ -98,6 +100,13 @@ pub const MouseButtonEvent = struct {
     /// The press that makes a double click, or a finger's double tap, by the
     /// system's own rule where it has one. A third press starts again.
     double_click: bool = false,
+};
+
+/// The usable part of a window changed, in the framebuffer's pixels. See
+/// `insets`.
+pub const SafeAreaEvent = struct {
+    window: WindowId,
+    insets: insets_mod.Insets,
 };
 
 /// The cursor moved, in content-area coordinates with the origin top left.
@@ -248,6 +257,11 @@ pub const Event = union(enum) {
     /// the one before.
     surface_created: SurfaceEvent,
 
+    /// The edges the system draws over have changed: a phone was turned, or it
+    /// put its gesture bar away. `Window.safeArea` is the same numbers at any
+    /// time. Never sent on a desktop, where nothing is drawn over a window.
+    safe_area: SafeAreaEvent,
+
     /// The application is going to the background. On Android this arrives
     /// before `surface_lost`; on the desktop it never arrives at all.
     suspended,
@@ -339,6 +353,7 @@ test "a switch over events compiles for every case" {
         .drop => "drop",
         .file_dialog => "file dialog",
         .surface_lost, .surface_created => "surface",
+        .safe_area => "safe area",
         .preedit => "preedit",
         .suspended, .resumed, .low_memory => "lifecycle",
         .gamepad_connected, .gamepad_disconnected => "gamepad",

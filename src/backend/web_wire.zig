@@ -71,6 +71,9 @@ pub const Kind = enum(u32) {
     dialog_begin = 16,
     /// One chosen file. `a` is its index, the text its name.
     dialog_file = 17,
+    /// The page's safe-area insets changed. `a`, `b`, `c` and `d` are left,
+    /// top, right and bottom, in the drawing buffer's pixels.
+    safe_area = 18,
     _,
 };
 
@@ -224,6 +227,7 @@ test "the event kinds are the numbers the glue sends" {
     try testing.expectEqual(15, @intFromEnum(Kind.surface_created));
     try testing.expectEqual(16, @intFromEnum(Kind.dialog_begin));
     try testing.expectEqual(17, @intFromEnum(Kind.dialog_file));
+    try testing.expectEqual(18, @intFromEnum(Kind.safe_area));
 }
 
 test "the window info is laid out the way the glue fills it" {

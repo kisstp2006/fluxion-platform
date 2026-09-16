@@ -91,6 +91,12 @@ pub extern "fluxion_platform" fn setRawMouseMotion(handle: u32, on: u32) u32;
 /// A `cursor.Shape`, by number.
 pub extern "fluxion_platform" fn setCursorShape(handle: u32, shape: u32) u32;
 
+/// The edges the page is drawn under - a phone's notch and its home bar, as
+/// `env(safe-area-inset-*)` - in the canvas's drawing buffer pixels, written
+/// as left, top, right, bottom. Zero on a page that has not asked for
+/// `viewport-fit=cover`, which is what makes a browser report them at all.
+pub extern "fluxion_platform" fn safeArea(handle: u32, out: *[4]u32) void;
+
 /// The window's icon, which on a page is the tab's: `len` bytes of RGBA at
 /// `pixels`. A null pointer puts back whatever the page had before.
 pub extern "fluxion_platform" fn setIcon(handle: u32, pixels: ?[*]const u8, len: u32, width: u32, height: u32) u32;

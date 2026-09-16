@@ -170,6 +170,20 @@ pub fn clearException(env: JniEnv) void {
 }
 
 /// The same, saying whether there was anything to clear.
+/// Give one or more of a class's `native` methods their C halves.
+///
+/// False where the class has no such method - a plain `NativeActivity`, whose
+/// app named it in the manifest instead of `FluxionActivity` - which is a
+/// program without dialogs or insets rather than an error.
+pub fn registerNatives(env: JniEnv, object: JObject, methods: []const NativeMethod) bool {
+    const class_of = env.*.GetObjectClass orelse return false;
+    const register = env.*.RegisterNatives orelse return false;
+    const class = class_of(env, object) orelse return false;
+    const done = register(env, class, methods.ptr, @intCast(methods.len)) == ok;
+    if (threw(env)) return false;
+    return done;
+}
+
 pub fn threw(env: JniEnv) bool {
     const occurred = env.*.ExceptionOccurred orelse return false;
     const clear = env.*.ExceptionClear orelse return false;
