@@ -47,6 +47,11 @@ pub const Backend = enum {
     /// Nothing. Not a gap: the target has no windowing system this library can
     /// reach, so there is nothing to find.
     none,
+    /// A windowing system the caller supplied to `Context.initWith`, none of the
+    /// ones above: Cocoa or UIKit written outside this library, a compositor of
+    /// a game console. It is never in `supported` and cannot be selected by
+    /// `Selection`, because this library does not know how to open it.
+    other,
 
     /// Is this one of the POSIX desktop backends? Both go through the same
     /// input plumbing and the same EGL, and differ in how a surface is made.

@@ -7,6 +7,11 @@
 //! and X11 in the next, and `Context` holds whichever answered. Everywhere else
 //! there is exactly one candidate and the indirection costs a call.
 //!
+//! An `Opener` is a vtable together with the function that opens the connection.
+//! `Context.opener` has the ones this build brings, and `Context.initWith` opens
+//! any opener, so a windowing system does not have to be written in this library:
+//! a program, or a registry it keeps, can hold openers of its own.
+//!
 //! Backends do not return events. They push them into the `Queue` the context
 //! owns, because one platform message can mean several events - a Win32
 //! `WM_SIZE` is a resize and a framebuffer resize, and a single keypress can
@@ -34,6 +39,18 @@ const Error = platform.Error;
 /// A backend's own state, whatever it is. Only the backend that made one ever
 /// looks inside.
 pub const Impl = *anyopaque;
+
+/// A way to open a windowing system.
+pub const Opener = struct {
+    /// What it is called: "win32", "x11", "cocoa". Nothing here reads it; it is
+    /// for whoever keeps openers by name.
+    name: []const u8,
+    /// Its table. `vtable.backend` is what `Context.backend` reports: `.other`
+    /// for one that is none of the built-in ones.
+    vtable: *const Vtable,
+    /// Opens the connection.
+    open: *const fn (gpa: Allocator) Error!Impl,
+};
 
 /// A backend's own per-window state.
 pub const NativeWindow = *anyopaque;

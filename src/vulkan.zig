@@ -69,13 +69,16 @@ pub fn requiredInstanceExtensions(backend: platform.Backend) []const [*:0]const 
         // Nothing to present to, so nothing to enable. A program that asks
         // anyway gets an empty list rather than a lie about what is available.
         .none => &.{},
+        // A windowing system this library has never seen: it knows no extension
+        // for it, and says so rather than guess.
+        .other => &.{},
     };
 }
 
 /// True where this build could make a surface at all.
 pub fn supported(backend: platform.Backend) bool {
     return switch (backend) {
-        .none, .web => false,
+        .none, .web, .other => false,
         .win32, .x11, .wayland, .android => true,
     };
 }

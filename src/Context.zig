@@ -139,49 +139,45 @@ pub fn init(gpa: Allocator, options: Options) Error!Context {
 
     var last: Error = error.NoDisplay;
     for (wanted) |candidate| {
-        const opened = openOne(gpa, candidate) catch |err| {
-            last = err;
+        const how = opener(candidate) orelse {
+            last = error.Unsupported;
             continue;
         };
-        return .{
-            .gpa = gpa,
-            .vtable = opened.vtable,
-            .impl = opened.impl,
-            .queue = .init(gpa),
+        return initWith(gpa, how) catch |err| {
+            last = err;
+            continue;
         };
     }
     return last;
 }
 
-const Opened = struct {
-    vtable: *const backend_mod.Vtable,
-    impl: backend_mod.Impl,
-};
+/// How to open one of the windowing systems this build brings, or null if it
+/// does not: `.other` is whatever a caller supplies, and the rest depend on the
+/// target.
+///
+/// A program that keeps its backends in a registry registers these by `name`.
+pub fn opener(which: platform.Backend) ?backend_mod.Opener {
+    return switch (which) {
+        .win32 => if (builtin.os.tag == .windows) .{ .name = "win32", .vtable = &win32.vtable, .open = win32.open } else null,
+        .wayland => if (posix_desktop) .{ .name = "wayland", .vtable = &wayland.vtable, .open = wayland.open } else null,
+        .x11 => if (posix_desktop) .{ .name = "x11", .vtable = &x11.vtable, .open = x11.open } else null,
+        .android => if (builtin.abi.isAndroid()) .{ .name = "android", .vtable = &android.vtable, .open = android.open } else null,
+        .web => if (platform.is_web) .{ .name = "web", .vtable = &web.vtable, .open = web.open } else null,
+        .none => .{ .name = "none", .vtable = &none.vtable, .open = none.open },
+        .other => null,
+    };
+}
 
-fn openOne(gpa: Allocator, which: platform.Backend) Error!Opened {
-    switch (which) {
-        .win32 => {
-            if (builtin.os.tag != .windows) return error.Unsupported;
-            return .{ .vtable = &win32.vtable, .impl = try win32.open(gpa) };
-        },
-        .wayland => {
-            if (!posix_desktop) return error.Unsupported;
-            return .{ .vtable = &wayland.vtable, .impl = try wayland.open(gpa) };
-        },
-        .x11 => {
-            if (!posix_desktop) return error.Unsupported;
-            return .{ .vtable = &x11.vtable, .impl = try x11.open(gpa) };
-        },
-        .android => {
-            if (!builtin.abi.isAndroid()) return error.Unsupported;
-            return .{ .vtable = &android.vtable, .impl = try android.open(gpa) };
-        },
-        .web => {
-            if (!platform.is_web) return error.Unsupported;
-            return .{ .vtable = &web.vtable, .impl = try web.open(gpa) };
-        },
-        .none => return .{ .vtable = &none.vtable, .impl = try none.open(gpa) },
-    }
+/// Opens the windowing system an opener describes: one of `opener`'s, or one the
+/// caller made. `Options.select` is not looked at, the opener has already
+/// chosen.
+pub fn initWith(gpa: Allocator, how: backend_mod.Opener) Error!Context {
+    return .{
+        .gpa = gpa,
+        .vtable = how.vtable,
+        .impl = try how.open(gpa),
+        .queue = .init(gpa),
+    };
 }
 
 /// Close every window and let go of the connection.
@@ -744,4 +740,68 @@ test "an id names one window forever, even after it is destroyed" {
     // was never handed out resolves to nothing.
     try testing.expectEqual(@as(?Window, null), ctx.window(@enumFromInt(1)));
     try testing.expectEqual(@as(?Window, null), ctx.window(.none));
+}
+
+// -------------------------------------------------------------------------
+// Tests - choosing a windowing system
+// -------------------------------------------------------------------------
+
+test "every backend this build supports has an opener with its own name" {
+    for (platform.supported) |which| {
+        const how = opener(which) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(@tagName(which), how.name);
+        try testing.expectEqual(which, how.vtable.backend);
+    }
+    const headless = opener(.none).?;
+    try testing.expectEqualStrings("none", headless.name);
+    // `other` is whatever a caller supplies, and a backend of another target is not here
+    try testing.expect(opener(.other) == null);
+    const absent: platform.Backend = if (builtin.os.tag == .windows) .wayland else .win32;
+    try testing.expect(opener(absent) == null);
+}
+
+test "a built-in opener opens the same context as select does" {
+    var by_select = try Context.init(testing.allocator, .{ .select = .{ .only = .none } });
+    defer by_select.deinit();
+    var by_opener = try Context.initWith(testing.allocator, opener(.none).?);
+    defer by_opener.deinit();
+
+    try testing.expectEqual(by_select.backend(), by_opener.backend());
+    try testing.expectEqual(platform.Backend.none, by_opener.backend());
+    try by_opener.pump();
+    try testing.expect(by_opener.poll() == null);
+}
+
+const other_vtable: backend_mod.Vtable = blk: {
+    var table = none.vtable;
+    table.backend = .other;
+    break :blk table;
+};
+
+test "initWith opens a windowing system the caller supplies and reports it as other" {
+    const mine: backend_mod.Opener = .{ .name = "mine", .vtable = &other_vtable, .open = none.open };
+    var ctx = try Context.initWith(testing.allocator, mine);
+    defer ctx.deinit();
+
+    try testing.expectEqual(platform.Backend.other, ctx.backend());
+    // it is a working context, not a label
+    try ctx.pump();
+    try testing.expect(ctx.poll() == null);
+}
+
+test "other cannot be selected, because this library does not know how to open it" {
+    try testing.expectError(
+        error.Unsupported,
+        Context.init(testing.allocator, .{ .select = .{ .only = .other } }),
+    );
+    try testing.expect(!platform.isSupported(.other));
+}
+
+fn refusesToOpen(_: Allocator) Error!backend_mod.Impl {
+    return error.ConnectionFailed;
+}
+
+test "an opener that refuses says why and leaves nothing behind" {
+    const how: backend_mod.Opener = .{ .name = "absent", .vtable = &other_vtable, .open = refusesToOpen };
+    try testing.expectError(error.ConnectionFailed, Context.initWith(testing.allocator, how));
 }

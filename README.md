@@ -24,7 +24,7 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `fonts` | The fonts the system draws its own interface and its own code in, as files a font library can open. |
 | `shell` | A file, a folder or an address handed to the system: opened, or shown in the file manager. |
 | `web` | What a browser build needs and `std` cannot give it: a console, a panic that says what it was, and the bytes of a dropped file. |
-| `backend` | What a windowing system has to answer to — the seam a new backend is written against. |
+| `backend` | What a windowing system has to answer to — the seam a new backend is written against, and the `Opener` that says how to open one. |
 
 The shape is GLFW's: window hints, key tokens at GLFW's own numbers, and
 `shouldClose` as a flag the program owns rather than something the system does
@@ -41,6 +41,7 @@ all.
 | `android` | Activity lifecycle, surface create and loss, focus, keys, touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard, file and folder dialogs (with `FluxionActivity`) |
 | `web` | Canvas, both loop models, keyboard, text and composition, mouse, touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard, file and folder dialogs |
 | `none` | Compiles and runs everywhere, makes no windows |
+| `other` | A windowing system the caller supplies to `Context.initWith`. Never selected by this library, since it does not know how to open it |
 
 On Linux `auto` opens Wayland where there is a compositor and falls through to
 X11 where there is not — the run-time selection the whole design exists for.
@@ -840,6 +841,36 @@ where a page is what is on the other side.
 
 `platform.supported` is what this build could open; `ctx.backend()` is what this
 run actually got.
+
+### Opening one you keep yourself
+
+`Context.init` picks among the backends this library brings. A program that keeps
+its windowing systems somewhere else - in a registry filled by modules, say, so
+that a Cocoa or a console backend written outside this library can be added without
+touching it - opens them itself.
+
+An `Opener` is plain data: a name, the backend's `Vtable`, and the function that
+opens the connection.
+
+```zig
+// The ones this build brings, by tag. Null where the target does not have it.
+const how = platform.Context.opener(.x11) orelse return error.Unsupported;
+registry.put(how.name, how);
+
+// Any opener, one of those or one of your own. Options.select is not looked at:
+// the opener has already chosen.
+var ctx = try platform.Context.initWith(gpa, how);
+defer ctx.deinit();
+```
+
+A backend of your own fills a `platform.backend.Vtable` and sets its `backend`
+field to `.other`; `ctx.backend()` then answers `.other`, and the opener's `name`
+is what tells it from the next one. `.other` is never in `platform.supported`, so
+`.only = .other` is `error.Unsupported`, and it reports no Vulkan instance extension: this library knows
+nothing about it, and says so rather than guess.
+
+`Context.init` is `opener` and `initWith` in a loop over what `Selection` allows,
+so a context made either way behaves the same.
 
 ## Threads, and one thing that does not move
 
