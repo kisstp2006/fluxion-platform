@@ -124,9 +124,8 @@ pub const Shape = enum {
 /// A named `Shape` is still the better answer where one fits: the system's own
 /// cursor is the one that matches the theme, the size and the display's scale.
 /// This is for the pointer a program has to draw itself - a paint tool's brush,
-/// an editor's drag - and it is Godot's `set_custom_mouse_cursor` in one call
-/// rather than one per shape: an image replaces this window's pointer until
-/// null puts the shape back.
+/// an editor's drag - and it is one call rather than one per shape: an image
+/// replaces this window's pointer until null puts the shape back.
 pub const Image = struct {
     /// Straight RGBA, one byte a channel, row by row from the top left: what a
     /// PNG decodes to. Not premultiplied - the backends that want it that way
@@ -139,8 +138,8 @@ pub const Image = struct {
     hot_x: u32 = 0,
     hot_y: u32 = 0,
 
-    /// The longest side a system will take, which is Godot's limit too. A
-    /// cursor larger than this is one the user would lose.
+    /// The longest side a system will take. A cursor larger than this is one
+    /// the user would lose.
     pub const max_side: u32 = 256;
 
     /// Is this an image a system could take: a size within the limit, the

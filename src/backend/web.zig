@@ -646,7 +646,7 @@ fn scrollLines(impl: backend.Impl) input.ScrollLines {
     return .{};
 }
 
-/// A page is told neither: Godot's double click, and Windows' default blink.
+/// A page is told neither: a double click within 400 ms, and Windows' default blink.
 fn doubleClickTime(impl: backend.Impl) u32 {
     _ = impl;
     return double_click_ms;
