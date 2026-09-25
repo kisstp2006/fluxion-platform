@@ -88,6 +88,9 @@ pub const fonts = @import("fonts.zig");
 pub const shell = @import("shell.zig");
 /// The console and the panic handler a browser build needs. See `web`.
 pub const web = @import("web.zig");
+/// The person's language and region, how dates and times are written there,
+/// and the time zone. See `culture`.
+pub const culture = @import("culture.zig");
 
 /// The connection to the windowing system. See `Context`.
 pub const Context = @import("Context.zig");
@@ -199,6 +202,7 @@ test {
     _ = folders;
     _ = fonts;
     _ = shell;
+    _ = culture;
     _ = @import("backend/unix_shell.zig");
     _ = @import("backend/kdeglobals.zig");
     _ = web;

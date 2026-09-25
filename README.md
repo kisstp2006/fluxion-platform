@@ -23,6 +23,7 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `folders` | Home, documents, and where a program keeps its settings, its data and its cache - the system's own answer. |
 | `fonts` | The fonts the system draws its own interface and its own code in, as files a font library can open. |
 | `shell` | A file, a folder or an address handed to the system: opened, or shown in the file manager. |
+| `culture` | The person's language and region, how dates, times and spans of time are written there, and the time zone - the system's own ICU asked. |
 | `web` | What a browser build needs and `std` cannot give it: a console, a panic that says what it was, and the bytes of a dropped file. |
 | `backend` | What a windowing system has to answer to — the seam a new backend is written against, and the `Opener` that says how to open one. |
 
@@ -526,6 +527,49 @@ calls a build has.
 | macOS | `~/Library/Application Support` and `Caches` | San Francisco, then Helvetica; SF Mono, then Menlo | `open`, and `open -R` to show |
 | Android | the app's own storage; documents are the part a file manager sees | Roboto; Droid Sans Mono | `openUrl` only, as an `ACTION_VIEW` intent - which also opens the `content://` a file dialog answers with |
 | web | `error.Unsupported` | `error.Unsupported` | `openUrl` only, in a new tab; `error.Refused` when the popup blocker says no |
+
+## Dates, times and languages come from the system
+
+```zig
+var tag: [platform.culture.max_tag]u8 = undefined;
+const mine = platform.culture.userLocale(&tag);         // "hu-HU"
+const offset = platform.culture.utcOffset(unix_ms);     // 7200 in a Budapest summer
+
+const hu = try platform.culture.Culture.open(gpa, "");  // the person's own, with their settings
+defer hu.close();
+hu.monthName(9, .wide, .format);                        // "szeptember"
+hu.dateTimePattern(.long, .short);                      // "y. MMMM d. H:mm"
+hu.relative(&buf, -1, .day, .wide, false);              // "tegnap"
+hu.amount(&buf, 5, .hour, .wide);                       // "5 óra"
+hu.plural(22);                                          // .other; Polish says .few
+```
+
+**`culture` asks the system's ICU**, the library every system keeps its
+languages in: `icu.dll` on Windows 10 and 11, `libicu.so` on Android 12 and
+later, `libicuuc` and `libicui18n` on a Linux that has them - loaded when first
+asked, never linked. A culture's names and patterns are read once: the months
+and days in every width, in a date and on their own; the four date and time
+styles and how the two join; the first day of the week and whether the clock
+has twelve hours. How long ago, the plural forms, amounts of a unit and lists
+of them are asked each time. The person's own culture, opened with an empty
+tag, keeps the choices they made in the system's settings.
+
+**Patterns are CLDR's**: `y. MMMM d.`, `EEEE, MMMM d, y`, `H:mm`. A program
+formats with them itself, from the names, so its time zone and its seconds are
+its own. `bestPattern("MMMMd")` gives the culture's pattern for a set of
+fields.
+
+**Without ICU a culture is English**, as the United States writes it, and its
+`source` says `.fallback`. The time zone is still the system's: ICU's rules
+for any moment where it is there, `localtime_r` where there is a libc, and
+Windows' rule for now where there is neither.
+
+| | ICU | the time zone without it | the person's locale without it |
+| --- | --- | --- | --- |
+| Windows | `icu.dll`, Windows 10 1903 and later | `GetTimeZoneInformation`: the offset now | `GetUserDefaultLocaleName` |
+| Linux | `libicuuc.so.N` and `libicui18n.so.N`, names ending `_N` | `localtime_r` | `LC_ALL`, `LC_TIME`, `LANG` |
+| Android | `libicu.so`, API 31 and later | `localtime_r` | `en-US` |
+| web, macOS | not yet: English | UTC | `en-US` |
 
 ## Drawing: a context, or a surface, and nothing after that
 
