@@ -26,10 +26,14 @@
 //! header would be two libraries in a coat.
 //!
 //! **A context belongs to one thread at a time.** `makeContextCurrent` binds it
-//! to the calling thread and unbinds it from whichever thread had it. A second
-//! thread that wants to draw needs its own context and a shared one at that -
-//! which is a thing this library does not do yet, and says so rather than
-//! pretending.
+//! to the calling thread and unbinds it from whichever thread had it.
+//!
+//! **Two windows can share what they draw with.** A window made with
+//! `Window.Desc.share_gl_with` naming another has a context of its own whose
+//! textures, buffers, shaders and programs are the other's: one renderer draws
+//! into both, making each current in turn. What holds other objects - a
+//! vertex array, a framebuffer - is each context's own, as GL has it. Web
+//! pages and Android have no such thing, and say so.
 
 const std = @import("std");
 const testing = std.testing;

@@ -1051,7 +1051,8 @@ fn createWindow(
 
     if (desc.gl) |config| {
         errdefer _ = self.u.DestroyWindow(hwnd);
-        native.context = try attachContext(self, hwnd, config);
+        const share = if (desc.gl_share) |other| (castWindow(other).context orelse return error.Unavailable).hglrc else null;
+        native.context = try attachContext(self, hwnd, config, share);
     }
 
     return native;
@@ -1063,7 +1064,7 @@ fn createWindow(
 /// WGL entry points - see `wgl` for why there is no other way - and it is done
 /// here rather than at `open` so that a program which never asks for OpenGL
 /// never makes an extra window.
-fn attachContext(self: *Impl, hwnd: HWND, config: gl.Config) Error!wgl.Context {
+fn attachContext(self: *Impl, hwnd: HWND, config: gl.Config, share: ?wgl.HGLRC) Error!wgl.Context {
     if (!self.gl.available()) return error.Unavailable;
 
     if (!self.gl.probed) {
@@ -1094,7 +1095,7 @@ fn attachContext(self: *Impl, hwnd: HWND, config: gl.Config) Error!wgl.Context {
     }
 
     const hdc = self.u.GetDC(hwnd) orelse return error.Unavailable;
-    return wgl.createContext(&self.gl, @ptrCast(hdc), config);
+    return wgl.createContext(&self.gl, @ptrCast(hdc), config, share);
 }
 
 fn makeContextCurrent(impl: backend.Impl, native: backend.NativeWindow) Error!void {

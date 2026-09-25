@@ -35,7 +35,7 @@ const Colormap = XID;
 const VisualID = c_ulong;
 
 const GLXFBConfig = *opaque {};
-const GLXContext = *opaque {};
+pub const GLXContext = *opaque {};
 const GLXDrawable = XID;
 
 /// `XVisualInfo`, which is what `XCreateWindow` needs and what a framebuffer
@@ -285,12 +285,14 @@ pub fn freeVisual(self: *Backend, visual: *XVisualInfo) void {
     if (self.x_free) |free| _ = free(visual);
 }
 
-/// Make the context, now that there is a window to point it at.
+/// Make the context, now that there is a window to point it at. `share`: a
+/// context whose objects the new one shares.
 pub fn createContext(
     self: *Backend,
     display: *Display,
     chosen: Chosen,
     window: Window,
+    share: ?GLXContext,
 ) Error!Context {
     const g = self.g orelse return error.Unavailable;
 
@@ -334,7 +336,7 @@ pub fn createContext(
             attribs[n] = 0;
             n += 1;
 
-            if (create(display, chosen.fb_config, null, 1, &attribs)) |made| break :blk made;
+            if (create(display, chosen.fb_config, share, 1, &attribs)) |made| break :blk made;
             return error.Unavailable;
         }
 
@@ -342,7 +344,7 @@ pub fn createContext(
         // old `glXCreateNewContext` behaviour. Only acceptable for a program
         // that did not ask for anything modern.
         if (chosen.config.major > 1 or chosen.config.api != .opengl) return error.Unavailable;
-        break :blk g.glXCreateNewContext(display, chosen.fb_config, glx_rgba_type, null, 1) orelse
+        break :blk g.glXCreateNewContext(display, chosen.fb_config, glx_rgba_type, share, 1) orelse
             return error.Unavailable;
     };
 

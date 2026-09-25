@@ -1268,7 +1268,8 @@ fn createWindow(
         .colormap = colormap,
     };
     if (chosen) |picked| {
-        native.context = try glx.createContext(&self.gl, @ptrCast(self.display), picked, window);
+        const share = if (desc.gl_share) |other| (castWindow(other).context orelse return error.Unavailable).handle else null;
+        native.context = try glx.createContext(&self.gl, @ptrCast(self.display), picked, window, share);
     }
     self.windows.put(gpa, window, native) catch return error.OutOfMemory;
 

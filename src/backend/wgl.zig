@@ -35,7 +35,7 @@ const Error = platform.Error;
 
 const HWND = *opaque {};
 const HDC = *opaque {};
-const HGLRC = *opaque {};
+pub const HGLRC = *opaque {};
 const HINSTANCE = *opaque {};
 
 /// `PIXELFORMATDESCRIPTOR`, which is the old way of asking and the only way
@@ -108,6 +108,7 @@ const wgl_context_es2_profile_bit_ext: i32 = 0x00000004;
 const Opengl32 = struct {
     wglCreateContext: *const fn (HDC) callconv(.winapi) ?HGLRC,
     wglDeleteContext: *const fn (HGLRC) callconv(.winapi) i32,
+    wglShareLists: *const fn (HGLRC, HGLRC) callconv(.winapi) i32,
     wglMakeCurrent: *const fn (?HDC, ?HGLRC) callconv(.winapi) i32,
     wglGetProcAddress: *const fn ([*:0]const u8) callconv(.winapi) ?gl.Proc,
     wglGetCurrentContext: *const fn () callconv(.winapi) ?HGLRC,
@@ -269,8 +270,9 @@ fn hasExtension(list: []const u8, name: []const u8) bool {
 /// Give a window a pixel format and a context.
 ///
 /// Called while the window is being created, because that is the only time a
-/// pixel format can be chosen.
-pub fn createContext(self: *Backend, hdc: HDC, config: gl.Config) Error!Context {
+/// pixel format can be chosen. `share`: a context whose objects the new one
+/// shares.
+pub fn createContext(self: *Backend, hdc: HDC, config: gl.Config, share: ?HGLRC) Error!Context {
     const wgl = self.wgl orelse return error.Unavailable;
     const g = self.g orelse return error.Unavailable;
 
@@ -317,7 +319,7 @@ pub fn createContext(self: *Backend, hdc: HDC, config: gl.Config) Error!Context 
             attribs[n] = 0;
             n += 1;
 
-            if (create(hdc, null, &attribs)) |made| break :blk made;
+            if (create(hdc, share, &attribs)) |made| break :blk made;
             // A driver that cannot give the version asked for says so by
             // returning null. Falling back to a 1.1 context would be worse
             // than saying no: the program would run and every modern call
@@ -329,7 +331,12 @@ pub fn createContext(self: *Backend, hdc: HDC, config: gl.Config) Error!Context 
         // rasteriser. Only the original context is possible, and a program that
         // wanted a modern one should hear about it.
         if (config.major > 1 or config.api != .opengl) return error.Unavailable;
-        break :blk wgl.wglCreateContext(hdc) orelse return error.Unavailable;
+        const made = wgl.wglCreateContext(hdc) orelse return error.Unavailable;
+        if (share) |with| if (wgl.wglShareLists(with, made) == 0) {
+            _ = wgl.wglDeleteContext(made);
+            return error.Unavailable;
+        };
+        break :blk made;
     };
 
     return .{ .hdc = hdc, .hglrc = hglrc, .config = config };

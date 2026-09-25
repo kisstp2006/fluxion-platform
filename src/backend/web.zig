@@ -348,6 +348,8 @@ fn createWindow(
     desc: backend.WindowDesc,
 ) Error!backend.NativeWindow {
     const self = cast(impl);
+    // A canvas's WebGL context shares nothing with another's.
+    if (desc.gl_share != null) return error.Unavailable;
     const request = try contextRequest(desc.gl);
 
     const native = gpa.create(Native) catch return error.OutOfMemory;

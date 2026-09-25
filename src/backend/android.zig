@@ -830,7 +830,8 @@ fn createWindow(
     desc: backend.WindowDesc,
 ) Error!backend.NativeWindow {
     const self = cast(impl);
-    if (self.native != null) return error.Unavailable;
+    // One window, so nothing to share a context with.
+    if (self.native != null or desc.gl_share != null) return error.Unavailable;
 
     const native = gpa.create(Native) catch return error.OutOfMemory;
     errdefer gpa.destroy(native);
@@ -880,7 +881,7 @@ fn attachContext(self: *Impl, native: *Native) Error!void {
     const format = egl.nativeVisualId(&self.gl, display, egl_config);
     _ = self.a.ANativeWindow_setBuffersGeometry(window, 0, 0, format);
 
-    native.context = try egl.createContext(&self.gl, display, egl_config, window, config);
+    native.context = try egl.createContext(&self.gl, display, egl_config, window, config, null);
 }
 
 /// Let go of a context whose surface has gone.

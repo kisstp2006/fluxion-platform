@@ -101,6 +101,45 @@ test "a context that was granted can be made current and swapped" {
     try win.makeContextCurrent();
 }
 
+test "a window made to share another's context draws with the other's textures" {
+    var fixture: Fixture = .{};
+    if (!fixture.open(.{})) return error.SkipZigTest;
+    defer fixture.close();
+    const second = fixture.ctx.createWindow(.{
+        .title = "fluxion-platform gl, shared",
+        .width = 64,
+        .height = 64,
+        .visible = false,
+        .gl = .{},
+        .share_gl_with = fixture.win,
+    }) catch |err| switch (err) {
+        error.Unavailable => return error.SkipZigTest,
+        else => return err,
+    };
+    defer second.destroy();
+
+    const apientry: std.builtin.CallingConvention = if (@import("builtin").os.tag == .windows) .winapi else .c;
+    const GenTextures = *const fn (i32, *u32) callconv(apientry) void;
+    const IsTexture = *const fn (u32) callconv(apientry) u8;
+    const BindTexture = *const fn (u32, u32) callconv(apientry) void;
+    const texture_2d: u32 = 0x0DE1;
+
+    // Made and bound in the first - a name is a texture once it is bound.
+    try fixture.win.makeContextCurrent();
+    const gen: GenTextures = @ptrCast(fixture.win.getProcAddress("glGenTextures") orelse return error.SkipZigTest);
+    const bind: BindTexture = @ptrCast(fixture.win.getProcAddress("glBindTexture") orelse return error.SkipZigTest);
+    var name: u32 = 0;
+    gen(1, &name);
+    bind(texture_2d, name);
+
+    // A texture in the second too.
+    try second.makeContextCurrent();
+    const is: IsTexture = @ptrCast(second.getProcAddress("glIsTexture") orelse return error.SkipZigTest);
+    try testing.expect(is(name) != 0);
+    try second.swapBuffers();
+    fixture.ctx.clearContext();
+}
+
 test "the swap interval is set or refused by name, never silently ignored" {
     var fixture: Fixture = .{};
     if (!fixture.open(.{})) return error.SkipZigTest;

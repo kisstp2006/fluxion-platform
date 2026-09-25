@@ -206,6 +206,10 @@ pub fn backend(self: *const Context) platform.Backend {
 /// Make a window.
 pub fn createWindow(self: *Context, desc: Window.Desc) Error!Window {
     const id: event.WindowId = @enumFromInt(self.next_id);
+    const share: ?backend_mod.NativeWindow = if (desc.share_gl_with) |other| blk: {
+        if (other.ctx != self) return error.Unavailable;
+        break :blk (self.windows.get(other.id) orelse return error.Unavailable).native;
+    } else null;
 
     const native = try self.vtable.createWindow(self.impl, self.gpa, id, .{
         .title = desc.title,
@@ -216,6 +220,7 @@ pub fn createWindow(self: *Context, desc: Window.Desc) Error!Window {
         .visible = desc.visible,
         .maximized = desc.maximized,
         .gl = desc.gl,
+        .gl_share = share,
     });
     errdefer self.vtable.destroyWindow(self.impl, self.gpa, native);
 

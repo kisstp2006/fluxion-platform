@@ -2655,7 +2655,10 @@ fn createWindow(
     request(self, surface, surface_commit, null);
     _ = w.wl_display_flush(self.display);
 
-    if (desc.gl) |config| try attachContext(self, native, config);
+    if (desc.gl) |config| {
+        const share = if (desc.gl_share) |other| (castWindow(other).context orelse return error.Unavailable).handle else null;
+        try attachContext(self, native, config, share);
+    }
 
     return native;
 }
@@ -2666,7 +2669,7 @@ fn createWindow(
 /// no size, and EGL needs something it can allocate buffers for. That is what a
 /// `wl_egl_window` is, and it is also what has to be told when the window
 /// resizes - EGL has no way to find out on its own.
-fn attachContext(self: *Impl, native: *Native, config: gl.Config) Error!void {
+fn attachContext(self: *Impl, native: *Native, config: gl.Config, share: ?egl.ContextHandle) Error!void {
     // Opened on the first window that wants one rather than at startup: a
     // program that never asks for a context never pays for loading a driver,
     // and on a compositor session most programs never do.
@@ -2694,7 +2697,7 @@ fn attachContext(self: *Impl, native: *Native, config: gl.Config) Error!void {
     ) orelse return error.Unavailable;
     errdefer we.wl_egl_window_destroy(egl_window);
 
-    native.context = try egl.createContext(&self.gl, display, egl_config, egl_window, config);
+    native.context = try egl.createContext(&self.gl, display, egl_config, egl_window, config, share);
     native.egl_window = egl_window;
 }
 

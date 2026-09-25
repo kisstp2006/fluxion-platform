@@ -235,12 +235,14 @@ pub fn nativeVisualId(self: *Backend, display: Display, config: Config) i32 {
 }
 
 /// Make the surface and the context, now that there is a native window.
+/// `share`: a context whose objects the new one shares.
 pub fn createContext(
     self: *Backend,
     display: Display,
     egl_config: Config,
     native: NativeWindow,
     config: gl.Config,
+    share: ?ContextHandle,
 ) Error!Context {
     const e = self.e orelse return error.Unavailable;
 
@@ -298,7 +300,7 @@ pub fn createContext(
     attribs[n] = egl_none;
     n += 1;
 
-    const handle = e.eglCreateContext(display, egl_config, null, &attribs) orelse
+    const handle = e.eglCreateContext(display, egl_config, share, &attribs) orelse
         return error.Unavailable;
 
     return .{ .surface = surface, .handle = handle, .config = config, .native = null };

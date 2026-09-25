@@ -73,6 +73,8 @@ pub const WindowDesc = struct {
     /// config named, and EGL wants a surface made against a config. A window
     /// has a context from the moment it exists or never.
     gl: ?gl_mod.Config,
+    /// The window whose context the new one's shares its objects with.
+    gl_share: ?NativeWindow = null,
 };
 
 /// What a window can be asked to become, beyond being shown or hidden.

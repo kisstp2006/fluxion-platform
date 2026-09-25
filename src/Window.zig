@@ -70,6 +70,11 @@ pub const Desc = struct {
     /// It has to be decided here. See `gl` for why no platform lets a window
     /// change its mind afterwards.
     gl: ?gl.Config = null,
+    /// A window of this context whose GL context the new one's shares its
+    /// textures, buffers, shaders and programs with, so one renderer draws
+    /// into both. Ask for the same kind of context as that window has.
+    /// `error.Unavailable` where contexts cannot share: a web page, Android.
+    share_gl_with: ?Window = null,
 };
 
 ctx: *Context,

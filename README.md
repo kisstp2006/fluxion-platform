@@ -592,6 +592,18 @@ the window built on the visual its framebuffer config named, and EGL wants a
 surface made against a config. A window has a context from the moment it
 exists or never gets one.
 
+**A second window can share the first's objects.** Made with
+`.share_gl_with = win`, its context is its own - current in turn, swapped on
+its own - but its textures, buffers, shaders and programs are the first's, so
+one renderer draws into both. What holds other objects, a vertex array or a
+framebuffer, is each context's own, as GL has it. A web page's canvases and
+Android's one window share nothing, and say `error.Unavailable`.
+
+```zig
+var tool = try ctx.createWindow(.{ .title = "Code", .gl = .{}, .share_gl_with = win });
+try tool.makeContextCurrent(); // draws with win's textures
+```
+
 **Nothing here loads a GL function.** `win.getProcAddress` is the whole of it;
 sorting what it returns into a table is a loader's job, and `fluxion-gl` is
 the one to use. The window is itself a resolver in `fluxion-dyn`'s sense - it
