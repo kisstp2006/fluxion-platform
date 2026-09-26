@@ -754,6 +754,10 @@ pub const vtable: backend.Vtable = .{
     .getState = getState,
     .setSizeLimits = setSizeLimits,
     .setOpacity = setOpacity,
+    .setDecorated = setDecorated,
+    .setResizable = setResizable,
+    .setTopmost = setTopmost,
+    .setKeepAwake = setKeepAwake,
 };
 
 pub fn open(gpa: Allocator) Error!backend.Impl {
@@ -1371,6 +1375,29 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
 
 fn setOpacity(impl: backend.Impl, native: backend.NativeWindow, opacity: f32) Error!void {
     _ = .{ impl, native, opacity };
+    return error.Unavailable;
+}
+
+/// An app's window is the whole screen, framed and stacked by the system.
+fn setDecorated(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+fn setResizable(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+fn setTopmost(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+/// The screen is kept on by a flag on the activity's window, which only the
+/// UI thread may set - not this one.
+fn setKeepAwake(impl: backend.Impl, on: bool) Error!void {
+    _ = .{ impl, on };
     return error.Unavailable;
 }
 

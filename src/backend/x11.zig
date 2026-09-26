@@ -477,6 +477,7 @@ const Xlib = struct {
     XStoreName: *const fn (*Display, Window, [*:0]const u8) callconv(.c) c_int,
     XSetWMNormalHints: *const fn (*Display, Window, *XSizeHints) callconv(.c) void,
     XFlush: *const fn (*Display) callconv(.c) c_int,
+    XResetScreenSaver: *const fn (*Display) callconv(.c) c_int,
     XConnectionNumber: *const fn (*Display) callconv(.c) c_int,
     XLookupString: *const fn (
         *XKeyEvent,
@@ -857,10 +858,15 @@ const Impl = struct {
     net_wm_window_opacity: Atom,
     cardinal: Atom,
     net_wm_state_fullscreen: Atom,
+    net_wm_state_above: Atom,
     net_wm_icon: Atom,
     net_workarea: Atom,
     wm_state: Atom,
     scale: f32,
+    /// Whether the screen saver is put off, and how many pumps since it was
+    /// last: see `setKeepAwake`.
+    keep_awake: bool = false,
+    pumps_awake: u32 = 0,
     /// Read once, at open, so that no click waits on a file.
     double_click_ms: u32,
     caret_blink_ms: ?u32,
@@ -947,6 +953,10 @@ const Native = struct {
     maximized: bool = false,
     focused: bool = false,
     held: bool = false,
+    /// What `WM_NORMAL_HINTS` are made from: a window that may not be resized
+    /// is held at its size, and one that may keeps its limits.
+    resizable: bool = true,
+    limits: backend.SizeLimits = .{},
     /// Focus came back while another client held the pointer; `pump` tries again.
     regrab: bool = false,
 
@@ -1038,6 +1048,10 @@ pub const vtable: backend.Vtable = .{
     .getState = getState,
     .setSizeLimits = setSizeLimits,
     .setOpacity = setOpacity,
+    .setDecorated = setDecorated,
+    .setResizable = setResizable,
+    .setTopmost = setTopmost,
+    .setKeepAwake = setKeepAwake,
 };
 
 pub fn open(gpa: Allocator) Error!backend.Impl {
@@ -1078,6 +1092,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .net_wm_window_opacity = x.XInternAtom(display, "_NET_WM_WINDOW_OPACITY", 0),
         .cardinal = x.XInternAtom(display, "CARDINAL", 0),
         .net_wm_state_fullscreen = x.XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", 0),
+        .net_wm_state_above = x.XInternAtom(display, "_NET_WM_STATE_ABOVE", 0),
         .net_wm_icon = x.XInternAtom(display, "_NET_WM_ICON", 0),
         .net_workarea = x.XInternAtom(display, "_NET_WORKAREA", 0),
         .wm_state = x.XInternAtom(display, "WM_STATE", 0),
@@ -1247,15 +1262,7 @@ fn createWindow(
 
     try setWindowTitle(self, window, desc.title);
 
-    if (!desc.resizable) {
-        var hints: XSizeHints = std.mem.zeroes(XSizeHints);
-        hints.flags = p_min_size | p_max_size;
-        hints.min_width = @intCast(desc.width);
-        hints.max_width = @intCast(desc.width);
-        hints.min_height = @intCast(desc.height);
-        hints.max_height = @intCast(desc.height);
-        x.XSetWMNormalHints(self.display, window, &hints);
-    }
+    if (!desc.resizable) setNormalHints(self, window, false, .{}, .{ desc.width, desc.height });
 
     if (!desc.decorated) setUndecorated(self, window);
 
@@ -1266,6 +1273,7 @@ fn createWindow(
         .width = desc.width,
         .height = desc.height,
         .colormap = colormap,
+        .resizable = desc.resizable,
     };
     if (chosen) |picked| {
         const share = if (desc.gl_share) |other| (castWindow(other).context orelse return error.Unavailable).handle else null;
@@ -1279,6 +1287,25 @@ fn createWindow(
     _ = x.XFlush(self.display);
 
     return native;
+}
+
+/// `WM_NORMAL_HINTS` for a window `now` big: held at that size where it may
+/// not be resized, and within `limits` where it may.
+fn setNormalHints(self: *Impl, window: Window, resizable: bool, limits: backend.SizeLimits, now: [2]u32) void {
+    var hints: XSizeHints = std.mem.zeroes(XSizeHints);
+    const least: [2]u32 = if (resizable) .{ limits.min_width, limits.min_height } else now;
+    const most: [2]u32 = if (resizable) .{ limits.max_width, limits.max_height } else now;
+    if (least[0] != 0 or least[1] != 0) {
+        hints.flags |= p_min_size;
+        hints.min_width = @intCast(least[0]);
+        hints.min_height = @intCast(least[1]);
+    }
+    if (most[0] != 0 or most[1] != 0) {
+        hints.flags |= p_max_size;
+        hints.max_width = @intCast(most[0]);
+        hints.max_height = @intCast(most[1]);
+    }
+    self.x.XSetWMNormalHints(self.display, window, &hints);
 }
 
 /// `_MOTIF_WM_HINTS` with the decorations bit cleared. An old Motif convention,
@@ -2313,18 +2340,8 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
     const self = cast(impl);
     const win = castWindow(native);
 
-    var hints: XSizeHints = std.mem.zeroes(XSizeHints);
-    if (limits.min_width != 0 or limits.min_height != 0) {
-        hints.flags |= p_min_size;
-        hints.min_width = @intCast(limits.min_width);
-        hints.min_height = @intCast(limits.min_height);
-    }
-    if (limits.max_width != 0 or limits.max_height != 0) {
-        hints.flags |= p_max_size;
-        hints.max_width = @intCast(limits.max_width);
-        hints.max_height = @intCast(limits.max_height);
-    }
-    self.x.XSetWMNormalHints(self.display, win.window, &hints);
+    win.limits = limits;
+    setNormalHints(self, win.window, win.resizable, limits, .{ win.width, win.height });
     _ = self.x.XFlush(self.display);
 
     // A window manager may apply new hints only to the next drag.
@@ -2333,6 +2350,48 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
     const inside = limits.clamp(now);
     if (!std.meta.eql(inside, now)) try setSize(impl, native, inside[0], inside[1]);
 }
+
+fn setResizable(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+    win.resizable = on;
+    setNormalHints(self, win.window, on, win.limits, .{ win.width, win.height });
+    _ = self.x.XFlush(self.display);
+}
+
+/// The Motif hints taken away give the window manager's own frame back.
+fn setDecorated(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+    if (on) {
+        const hints_atom = self.x.XInternAtom(self.display, "_MOTIF_WM_HINTS", 0);
+        if (hints_atom != 0) _ = self.x.XDeleteProperty(self.display, win.window, hints_atom);
+    } else setUndecorated(self, win.window);
+    _ = self.x.XFlush(self.display);
+}
+
+/// `_NET_WM_STATE_ABOVE`, asked of the window manager.
+fn setTopmost(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+    if (self.net_wm_state_above == 0) return error.Unavailable;
+    sendState(self, win.window, if (on) net_wm_state_add else net_wm_state_remove, self.net_wm_state_above, 0);
+    _ = self.x.XFlush(self.display);
+}
+
+/// Kept awake by `pump`, which tells the server there was input every so
+/// often: `XResetScreenSaver` puts off the screen saver and the display's
+/// power saving alike.
+fn setKeepAwake(impl: backend.Impl, on: bool) Error!void {
+    const self = cast(impl);
+    self.keep_awake = on;
+    self.pumps_awake = 0;
+}
+
+/// How many pumps between two resets of the screen saver, while it is kept
+/// off: at sixty a second, twenty seconds - well inside the shortest timeout
+/// a desktop offers.
+const pumps_per_reset = 1200;
 
 /// `_NET_WM_WINDOW_OPACITY`, which a compositor reads and acts on.
 ///
@@ -2401,6 +2460,11 @@ fn trimPrefix(line: []const u8, prefix: []const u8) ?[]const u8 {
 
 fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
     const self = cast(impl);
+
+    if (self.keep_awake) {
+        if (self.pumps_awake % pumps_per_reset == 0) _ = self.x.XResetScreenSaver(self.display);
+        self.pumps_awake +%= 1;
+    }
 
     if (comptime has_display) drainWake(self);
     // The last answer's paths were promised until now.

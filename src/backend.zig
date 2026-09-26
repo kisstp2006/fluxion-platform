@@ -211,6 +211,19 @@ pub const Vtable = struct {
     /// where the system has no such idea.
     setOpacity: *const fn (impl: Impl, native: NativeWindow, opacity: f32) Error!void,
 
+    /// Give the window the system's frame and title bar, or take them away,
+    /// keeping its content area where and how big it is. A fullscreen window
+    /// takes the change when it is windowed again.
+    setDecorated: *const fn (impl: Impl, native: NativeWindow, on: bool) Error!void,
+    /// Let the user drag the window's edges, or not.
+    setResizable: *const fn (impl: Impl, native: NativeWindow, on: bool) Error!void,
+    /// Keep the window over every window that is not kept so itself.
+    setTopmost: *const fn (impl: Impl, native: NativeWindow, on: bool) Error!void,
+
+    /// Keep the screen from blanking and the machine from sleeping for want
+    /// of input while the program runs, or let them again.
+    setKeepAwake: *const fn (impl: Impl, on: bool) Error!void,
+
     /// Hide, confine or free the pointer. See `cursor.Mode`. A confining mode
     /// holds the pointer only while the window has focus.
     setCursorMode: *const fn (impl: Impl, native: NativeWindow, mode: cursor.Mode) Error!void,

@@ -84,6 +84,10 @@ pub const vtable: backend.Vtable = .{
     .getState = getState,
     .setSizeLimits = setSizeLimits,
     .setOpacity = setOpacity,
+    .setDecorated = setDecorated,
+    .setResizable = setResizable,
+    .setTopmost = setTopmost,
+    .setKeepAwake = setKeepAwake,
 };
 
 /// Open it. Cannot fail: there is nothing to connect to.
@@ -357,6 +361,27 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
 
 fn setOpacity(impl: backend.Impl, native: backend.NativeWindow, opacity: f32) Error!void {
     _ = .{ impl, native, opacity };
+    return error.Unavailable;
+}
+
+/// With no display there is no frame, no stacking and no screen to keep on.
+fn setDecorated(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+fn setResizable(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+fn setTopmost(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+fn setKeepAwake(impl: backend.Impl, on: bool) Error!void {
+    _ = .{ impl, on };
     return error.Unavailable;
 }
 

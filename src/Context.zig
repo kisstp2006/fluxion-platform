@@ -111,6 +111,8 @@ monitor_list: std.ArrayListUnmanaged(monitor.Monitor) = .empty,
 /// into. See the vtable's `enumerateMonitors` for why it is separate.
 monitor_modes: std.ArrayListUnmanaged(monitor.VideoMode) = .empty,
 monitors_known: bool = false,
+/// Whether the program keeps the screen on: see `setKeepAwake`.
+keep_awake: bool = false,
 
 /// Every controller slot, refreshed by `pump`. Sixteen values held inline,
 /// because a device is small and a program that reads one every frame should
@@ -224,7 +226,12 @@ pub fn createWindow(self: *Context, desc: Window.Desc) Error!Window {
     });
     errdefer self.vtable.destroyWindow(self.impl, self.gpa, native);
 
-    try self.windows.put(self.gpa, id, .{ .native = native, .should_close = false });
+    try self.windows.put(self.gpa, id, .{
+        .native = native,
+        .should_close = false,
+        .decorated = desc.decorated,
+        .resizable = desc.resizable,
+    });
     self.next_id += 1;
 
     return .{ .ctx = self, .id = id };
@@ -638,6 +645,20 @@ pub fn caretBlinkTime(self: *Context) ?u32 {
 /// and ends inside one frame is not lost. See `input.State`.
 pub fn setStickyKeys(self: *Context, on: bool) void {
     self.state.sticky = on;
+}
+
+/// Keep the screen from blanking, and the machine from going to sleep, for
+/// want of input while the program runs - a game played with a pad, a film -
+/// or let them again. `error.Unavailable` where the program cannot say: a
+/// phone, a page, and Wayland.
+pub fn setKeepAwake(self: *Context, on: bool) Error!void {
+    try self.vtable.setKeepAwake(self.impl, on);
+    self.keep_awake = on;
+}
+
+/// Whether the program keeps the screen on, as last set.
+pub fn keepAwake(self: *const Context) bool {
+    return self.keep_awake;
 }
 
 // -------------------------------------------------------------------------

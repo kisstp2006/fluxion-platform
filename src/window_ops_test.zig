@@ -97,6 +97,45 @@ test "every state call either works or refuses by name" {
     _ = win.position();
 }
 
+test "a window's frame, its edges and its place in the stack change, or say they cannot, and it keeps its size" {
+    var fixture: Fixture = .{};
+    if (!fixture.open()) return error.SkipZigTest;
+    defer fixture.close();
+    const win = fixture.win;
+
+    try testing.expect(win.decorated());
+    try testing.expect(win.resizable());
+    try testing.expect(!win.topmost());
+    const before = win.size();
+
+    // Each worked, and then it says so; or it refused by name, and says
+    // what it was.
+    if (win.setDecorated(false)) |_| try testing.expect(!win.decorated()) else |err| try testing.expectEqual(error.Unavailable, err);
+    if (win.setResizable(false)) |_| try testing.expect(!win.resizable()) else |err| try testing.expectEqual(error.Unavailable, err);
+    if (win.setTopmost(true)) |_| try testing.expect(win.topmost()) else |err| try testing.expectEqual(error.Unavailable, err);
+    for (0..5) |_| try fixture.ctx.pump();
+    // The content area kept its size through a frame taken away.
+    try testing.expectEqual(before, win.size());
+
+    try allowed(win.setDecorated(true));
+    try allowed(win.setResizable(true));
+    try allowed(win.setTopmost(false));
+    for (0..5) |_| try fixture.ctx.pump();
+    try testing.expectEqual(before, win.size());
+}
+
+test "the screen can be kept on while the program runs, and let go again" {
+    var fixture: Fixture = .{};
+    if (!fixture.open()) return error.SkipZigTest;
+    defer fixture.close();
+    if (fixture.ctx.setKeepAwake(true)) |_| {
+        try testing.expect(fixture.ctx.keepAwake());
+        for (0..3) |_| try fixture.ctx.pump();
+        try fixture.ctx.setKeepAwake(false);
+        try testing.expect(!fixture.ctx.keepAwake());
+    } else |err| try testing.expectEqual(error.Unavailable, err);
+}
+
 test "a position that was set is a position that reads back" {
     var fixture: Fixture = .{};
     // Mapped, because an unmapped window has no position to report.

@@ -884,6 +884,11 @@ const Native = struct {
     /// fullscreen without anyone here asking, and the configure is where that
     /// is found out.
     fullscreen: bool = false,
+    /// What the toplevel's least and most sizes are made from: a window that
+    /// may not be resized is held at its size, and one that may keeps its
+    /// limits.
+    resizable: bool = true,
+    limits: backend.SizeLimits = .{},
     /// How big the window was before it filled a monitor.
     ///
     /// Wayland has nowhere else to keep it. Leaving fullscreen brings a
@@ -952,6 +957,10 @@ pub const vtable: backend.Vtable = .{
     .getState = getState,
     .setSizeLimits = setSizeLimits,
     .setOpacity = setOpacity,
+    .setDecorated = setDecorated,
+    .setResizable = setResizable,
+    .setTopmost = setTopmost,
+    .setKeepAwake = setKeepAwake,
 };
 
 // -------------------------------------------------------------------------
@@ -2648,6 +2657,8 @@ fn createWindow(
     errdefer _ = self.windows.swapRemove(@intFromPtr(surface));
 
     try sendTitle(self, toplevel, desc.title);
+    native.resizable = desc.resizable;
+    if (!desc.resizable) sendSizeHints(self, native);
 
     // The first commit with no buffer is what asks the compositor for a
     // configure. Nothing is on screen yet, and nothing can be until a renderer
@@ -3321,18 +3332,8 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
     const self = cast(impl);
     const win = castWindow(native);
 
-    var min = [_]WlArgument{
-        .{ .i = @intCast(limits.min_width) },
-        .{ .i = @intCast(limits.min_height) },
-    };
-    request(self, win.toplevel, toplevel_set_min_size, &min);
-
-    var max = [_]WlArgument{
-        .{ .i = @intCast(limits.max_width) },
-        .{ .i = @intCast(limits.max_height) },
-    };
-    request(self, win.toplevel, toplevel_set_max_size, &max);
-
+    win.limits = limits;
+    sendSizeHints(self, win);
     request(self, win.surface, surface_commit, null);
     _ = self.w.wl_display_flush(self.display);
 
@@ -3341,6 +3342,45 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
     const now: [2]u32 = .{ win.width, win.height };
     const inside = limits.clamp(now);
     if (!std.meta.eql(inside, now)) applySize(self, win, inside[0], inside[1]);
+}
+
+/// The toplevel's least and most sizes: its own where it may not be resized,
+/// its limits where it may.
+fn sendSizeHints(self: *Impl, win: *Native) void {
+    const least: [2]u32 = if (win.resizable) .{ win.limits.min_width, win.limits.min_height } else .{ win.width, win.height };
+    const most: [2]u32 = if (win.resizable) .{ win.limits.max_width, win.limits.max_height } else .{ win.width, win.height };
+    var min = [_]WlArgument{ .{ .i = @intCast(least[0]) }, .{ .i = @intCast(least[1]) } };
+    request(self, win.toplevel, toplevel_set_min_size, &min);
+    var max = [_]WlArgument{ .{ .i = @intCast(most[0]) }, .{ .i = @intCast(most[1]) } };
+    request(self, win.toplevel, toplevel_set_max_size, &max);
+}
+
+fn setResizable(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+    win.resizable = on;
+    sendSizeHints(self, win);
+    request(self, win.surface, surface_commit, null);
+    _ = self.w.wl_display_flush(self.display);
+}
+
+/// A frame is the compositor's to draw or not: with no decoration protocol
+/// bound, a program has nothing to ask it with.
+fn setDecorated(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+/// The stacking of windows is the compositor's alone.
+fn setTopmost(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+/// Kept awake by an idle inhibitor, which is a protocol not bound here.
+fn setKeepAwake(impl: backend.Impl, on: bool) Error!void {
+    _ = .{ impl, on };
+    return error.Unavailable;
 }
 
 /// Transparency is in the pixels a program draws.

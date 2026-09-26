@@ -238,6 +238,10 @@ pub const vtable: backend.Vtable = .{
     .getState = getState,
     .setSizeLimits = setSizeLimits,
     .setOpacity = setOpacity,
+    .setDecorated = setDecorated,
+    .setResizable = setResizable,
+    .setTopmost = setTopmost,
+    .setKeepAwake = setKeepAwake,
 };
 
 /// Start listening to the page.
@@ -521,6 +525,27 @@ fn setSizeLimits(impl: backend.Impl, native: backend.NativeWindow, limits: backe
 fn setOpacity(impl: backend.Impl, native: backend.NativeWindow, opacity: f32) Error!void {
     _ = impl;
     js.setOpacity(castWindow(native).handle, std.math.clamp(opacity, 0, 1));
+}
+
+/// A canvas in a page: the browser frames the page, and stacks the tabs.
+fn setDecorated(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+fn setResizable(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+fn setTopmost(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    _ = .{ impl, native, on };
+    return error.Unavailable;
+}
+
+fn setKeepAwake(impl: backend.Impl, on: bool) Error!void {
+    _ = .{ impl, on };
+    return error.Unavailable;
 }
 
 // -------------------------------------------------------------------------

@@ -43,6 +43,9 @@ pub const Entry = struct {
     raw_motion: bool = false,
     fullscreen: monitor_mod.Fullscreen = .windowed,
     text_input: bool = false,
+    decorated: bool = true,
+    resizable: bool = true,
+    topmost: bool = false,
 };
 
 /// What a window is being asked for.
@@ -225,6 +228,50 @@ pub fn setSizeLimits(self: Window, limits: backend.SizeLimits) Error!void {
 pub fn setOpacity(self: Window, opacity: f32) Error!void {
     const e = self.ctx.entry(self.id) orelse return error.Unavailable;
     return self.ctx.vtable.setOpacity(self.ctx.impl, e.native, opacity);
+}
+
+/// Give it the system's frame and title bar, or take them away - a
+/// borderless window - keeping its content area where and how big it is.
+/// `error.Unavailable` where the system decides: a phone, a page, and
+/// Wayland, whose windows here have no frame of the system's to give.
+pub fn setDecorated(self: Window, on: bool) Error!void {
+    const e = self.ctx.entry(self.id) orelse return error.Unavailable;
+    try self.ctx.vtable.setDecorated(self.ctx.impl, e.native, on);
+    e.decorated = on;
+}
+
+/// Whether it has the system's frame, as it was made or last set.
+pub fn decorated(self: Window) bool {
+    const e = self.ctx.entry(self.id) orelse return false;
+    return e.decorated;
+}
+
+/// Let the user drag its edges, or not. A program may still resize it.
+pub fn setResizable(self: Window, on: bool) Error!void {
+    const e = self.ctx.entry(self.id) orelse return error.Unavailable;
+    try self.ctx.vtable.setResizable(self.ctx.impl, e.native, on);
+    e.resizable = on;
+}
+
+/// Whether the user may drag its edges, as it was made or last set.
+pub fn resizable(self: Window) bool {
+    const e = self.ctx.entry(self.id) orelse return false;
+    return e.resizable;
+}
+
+/// Keep it over every window that is not kept so itself. `error.Unavailable`
+/// on Wayland, which leaves the stacking to the compositor, and on a phone
+/// or a page.
+pub fn setTopmost(self: Window, on: bool) Error!void {
+    const e = self.ctx.entry(self.id) orelse return error.Unavailable;
+    try self.ctx.vtable.setTopmost(self.ctx.impl, e.native, on);
+    e.topmost = on;
+}
+
+/// Whether it is kept over the others, as last set.
+pub fn topmost(self: Window) bool {
+    const e = self.ctx.entry(self.id) orelse return false;
+    return e.topmost;
 }
 
 // -------------------------------------------------------------------------

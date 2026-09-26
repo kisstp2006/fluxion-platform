@@ -243,6 +243,9 @@ const swp_showwindow: u32 = 0x0040;
 const swp_nocopybits: u32 = 0x0100;
 /// `HWND_TOP`, which is a window handle that is really a small number.
 const hwnd_top: ?HWND = null;
+/// `HWND_TOPMOST` and `HWND_NOTOPMOST`: -1 and -2, as handles.
+const hwnd_topmost: ?HWND = @ptrFromInt(std.math.maxInt(usize));
+const hwnd_notopmost: ?HWND = @ptrFromInt(std.math.maxInt(usize) - 1);
 
 /// `MONITORINFOF_PRIMARY`.
 const monitorinfof_primary: u32 = 0x00000001;
@@ -550,6 +553,7 @@ const Kernel32 = struct {
     GetFileSizeEx: *const fn (*anyopaque, *i64) callconv(.winapi) i32,
     ReadFile: *const fn (*anyopaque, [*]u8, u32, *u32, ?*anyopaque) callconv(.winapi) i32,
     CloseHandle: *const fn (*anyopaque) callconv(.winapi) i32,
+    SetThreadExecutionState: *const fn (u32) callconv(.winapi) u32,
 };
 
 /// `CF_UNICODETEXT`. Windows makes the other text formats from it, and it from
@@ -739,6 +743,10 @@ const Native = struct {
     /// Applied in `WM_GETMINMAXINFO`, which is the only place Windows asks.
     limits: backend.SizeLimits = .{},
     style: u32 = 0,
+    /// What its frame is to be - see `frameStyle` - kept apart from `style`,
+    /// which a fullscreen window has none of.
+    decorated: bool = true,
+    resizable: bool = true,
 
     iconified: bool = false,
     maximized: bool = false,
@@ -841,6 +849,10 @@ pub const vtable: backend.Vtable = .{
     .getState = getState,
     .setSizeLimits = setSizeLimits,
     .setOpacity = setOpacity,
+    .setDecorated = setDecorated,
+    .setResizable = setResizable,
+    .setTopmost = setTopmost,
+    .setKeepAwake = setKeepAwake,
 };
 
 pub fn open(gpa: Allocator) Error!backend.Impl {
@@ -986,17 +998,23 @@ fn userData(self: *Impl, hwnd: HWND) ?*Native {
 }
 
 fn styleFor(desc: backend.WindowDesc) u32 {
-    var style: u32 = ws_clipsiblings | ws_clipchildren;
-    if (desc.decorated) {
-        style |= ws_overlapped | ws_caption | ws_sysmenu | ws_minimizebox;
-        if (desc.resizable) style |= ws_thickframe | ws_maximizebox;
-    } else {
-        style |= ws_popup;
-    }
+    var style: u32 = ws_clipsiblings | ws_clipchildren | frameStyle(desc.decorated, desc.resizable);
     if (desc.visible) style |= ws_visible;
     if (desc.maximized and desc.resizable) style |= ws_maximize;
     return style;
 }
+
+/// The frame's part of a window's style. Undecorated is a popup, and has no
+/// frame to drag.
+fn frameStyle(decorated: bool, resizable: bool) u32 {
+    if (!decorated) return ws_popup;
+    var style: u32 = ws_overlapped | ws_caption | ws_sysmenu | ws_minimizebox;
+    if (resizable) style |= ws_thickframe | ws_maximizebox;
+    return style;
+}
+
+/// Every bit `frameStyle` may set, to take them off before it does.
+const frame_bits: u32 = ws_popup | ws_overlapped | ws_caption | ws_sysmenu | ws_minimizebox | ws_thickframe | ws_maximizebox;
 
 fn createWindow(
     impl: backend.Impl,
@@ -1025,7 +1043,7 @@ fn createWindow(
     };
     _ = self.u.AdjustWindowRectEx(&rect, style, 0, 0);
 
-    native.* = .{ .hwnd = undefined, .id = id, .impl = self, .style = style };
+    native.* = .{ .hwnd = undefined, .id = id, .impl = self, .style = style, .decorated = desc.decorated, .resizable = desc.resizable };
 
     const hwnd = self.u.CreateWindowExW(
         0,
@@ -1991,6 +2009,80 @@ fn setOpacity(impl: backend.Impl, native: backend.NativeWindow, opacity: f32) Er
         const alpha: u8 = @intFromFloat(@round(clamped * 255));
         if (set(win.hwnd, 0, alpha, lwa_alpha) == 0) return error.Unavailable;
     }
+}
+
+fn setDecorated(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    const win = castWindow(native);
+    win.decorated = on;
+    return applyFrame(cast(impl), win);
+}
+
+fn setResizable(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    const win = castWindow(native);
+    win.resizable = on;
+    return applyFrame(cast(impl), win);
+}
+
+/// Give the window the frame `decorated` and `resizable` say, keeping its
+/// content area where and how big it is. A fullscreen window has no frame,
+/// and takes this one when it is windowed again; a maximised or minimised
+/// one keeps its place.
+fn applyFrame(self: *Impl, win: *Native) Error!void {
+    const frame = frameStyle(win.decorated, win.resizable);
+    if (win.is_fullscreen) {
+        win.saved_style = (win.saved_style & ~frame_bits) | frame;
+        return;
+    }
+    const style = (win.style & ~frame_bits) | frame;
+    const still = self.u.IsIconic(win.hwnd) != 0 or self.u.IsZoomed(win.hwnd) != 0;
+    var client: Rect = .{};
+    var origin: Point = .{};
+    if (!still) {
+        if (self.u.GetClientRect(win.hwnd, &client) == 0) return error.Unavailable;
+        if (self.u.ClientToScreen(win.hwnd, &origin) == 0) return error.Unavailable;
+    }
+    setStyle(self, win.hwnd, style);
+    win.style = style;
+
+    var rect: Rect = .{ .left = origin.x, .top = origin.y, .right = origin.x + client.right, .bottom = origin.y + client.bottom };
+    _ = self.u.AdjustWindowRectEx(&rect, style, 0, 0);
+    const keep: u32 = if (still) swp_nomove | swp_nosize else 0;
+    if (self.u.SetWindowPos(
+        win.hwnd,
+        null,
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        keep | swp_nozorder | swp_noactivate | swp_framechanged,
+    ) == 0) return error.Unavailable;
+}
+
+fn setTopmost(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
+    const self = cast(impl);
+    const win = castWindow(native);
+    if (self.u.SetWindowPos(
+        win.hwnd,
+        if (on) hwnd_topmost else hwnd_notopmost,
+        0,
+        0,
+        0,
+        0,
+        swp_nomove | swp_nosize | swp_noactivate,
+    ) == 0) return error.Unavailable;
+}
+
+/// `ES_CONTINUOUS`, `ES_DISPLAY_REQUIRED` and `ES_SYSTEM_REQUIRED`: in force
+/// until said again, for this thread - the one the program runs its windows
+/// on.
+const es_continuous: u32 = 0x80000000;
+const es_display_required: u32 = 0x00000002;
+const es_system_required: u32 = 0x00000001;
+
+fn setKeepAwake(impl: backend.Impl, on: bool) Error!void {
+    const self = cast(impl);
+    const wanted = if (on) es_continuous | es_display_required | es_system_required else es_continuous;
+    if (self.k.SetThreadExecutionState(wanted) == 0) return error.Unavailable;
 }
 
 // -------------------------------------------------------------------------
