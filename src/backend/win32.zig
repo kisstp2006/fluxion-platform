@@ -217,6 +217,7 @@ const sw_minimize: i32 = 6;
 const sw_restore: i32 = 9;
 const sw_maximize: i32 = 3;
 const sw_shownormal: u32 = 1;
+const sw_showmaximized: u32 = 3;
 
 const WindowPlacement = extern struct {
     length: u32 = @sizeOf(WindowPlacement),
@@ -781,9 +782,10 @@ const Native = struct {
     raw_last_y: i32 = 0,
     has_raw_last: bool = false,
 
-    /// Where the window was before it went fullscreen, so that leaving puts it
-    /// back rather than in the corner.
-    saved_frame: Rect = .{},
+    /// Where the window was before it went fullscreen - its own place and
+    /// size, and whether it was maximised - so that leaving puts it back as
+    /// it was rather than in the corner, or a window the size of the screen.
+    saved_placement: WindowPlacement = .{},
     saved_style: u32 = 0,
     /// The display whose mode this window changed, so leaving can change it
     /// back. Empty unless an `.exclusive` fullscreen is in force.
@@ -2030,7 +2032,18 @@ fn setResizable(impl: backend.Impl, native: backend.NativeWindow, on: bool) Erro
 fn applyFrame(self: *Impl, win: *Native) Error!void {
     const frame = frameStyle(win.decorated, win.resizable);
     if (win.is_fullscreen) {
-        win.saved_style = (win.saved_style & ~frame_bits) | frame;
+        // Taken when it is a window again, round the content area it had.
+        const style = (win.saved_style & ~frame_bits) | frame;
+        var before: Rect = .{};
+        var after: Rect = .{};
+        _ = self.u.AdjustWindowRectEx(&before, win.saved_style, 0, 0);
+        _ = self.u.AdjustWindowRectEx(&after, style, 0, 0);
+        const normal = &win.saved_placement.normal_position;
+        normal.left += after.left - before.left;
+        normal.top += after.top - before.top;
+        normal.right += after.right - before.right;
+        normal.bottom += after.bottom - before.bottom;
+        win.saved_style = style;
         return;
     }
     const style = (win.style & ~frame_bits) | frame;
@@ -2252,15 +2265,12 @@ fn setFullscreen(
 
         setStyle(self, win.hwnd, win.saved_style);
         win.style = win.saved_style;
-        _ = self.u.SetWindowPos(
-            win.hwnd,
-            null,
-            win.saved_frame.left,
-            win.saved_frame.top,
-            win.saved_frame.right - win.saved_frame.left,
-            win.saved_frame.bottom - win.saved_frame.top,
-            swp_nozorder | swp_noactivate | swp_framechanged,
-        );
+        // The placement puts back the window's own rectangle and, over it,
+        // the maximised state it had: a maximised window leaves fullscreen
+        // maximised, and restored after is its own size again.
+        _ = self.u.SetWindowPos(win.hwnd, null, 0, 0, 0, 0, swp_nomove | swp_nosize | swp_nozorder | swp_noactivate | swp_framechanged);
+        if (win.saved_placement.show_cmd != sw_showmaximized) win.saved_placement.show_cmd = sw_shownormal;
+        _ = self.u.SetWindowPlacement(win.hwnd, &win.saved_placement);
         win.is_fullscreen = false;
         return;
     }
@@ -2271,7 +2281,8 @@ fn setFullscreen(
     // another must not overwrite the window's real geometry with its fullscreen
     // one.
     if (!win.is_fullscreen) {
-        _ = self.u.GetWindowRect(win.hwnd, &win.saved_frame);
+        win.saved_placement = .{};
+        _ = self.u.GetWindowPlacement(win.hwnd, &win.saved_placement);
         win.saved_style = win.style;
     }
 
@@ -2359,11 +2370,21 @@ fn deviceNameAt(self: *Impl, mon: *const monitor.Monitor) ?[32]u16 {
     return finder.found;
 }
 
+/// Give the window `style`, but for whether it shows: that is Windows' to
+/// keep, since `ShowWindow` changes it, and a style kept from before would
+/// hide a window shown since - or show one hidden.
 fn setStyle(self: *Impl, hwnd: HWND, style: u32) void {
+    const now: u32 = if (self.u.GetWindowLongPtrW) |get|
+        @truncate(@as(usize, @bitCast(get(hwnd, gwl_style))))
+    else if (self.u.GetWindowLongW) |get|
+        @bitCast(get(hwnd, gwl_style))
+    else
+        style;
+    const kept = style | (now & ws_visible);
     if (self.u.SetWindowLongPtrW) |set| {
-        _ = set(hwnd, gwl_style, @bitCast(@as(usize, style)));
+        _ = set(hwnd, gwl_style, @bitCast(@as(usize, kept)));
     } else if (self.u.SetWindowLongW) |set| {
-        _ = set(hwnd, gwl_style, @bitCast(style));
+        _ = set(hwnd, gwl_style, @bitCast(kept));
     }
 }
 
