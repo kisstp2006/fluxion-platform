@@ -393,6 +393,14 @@ const iace_default: u32 = 0x0010;
 
 const size_restored: WPARAM = 0;
 const size_minimized: WPARAM = 1;
+const wm_timer: u32 = 0x0113;
+/// The timer that takes a window brought back maximised down to its own
+/// size: see `Native.restore_to_normal`.
+const unmaximize_timer: usize = 1;
+/// How often it tries, and for how long: Windows takes no new state while it
+/// is still bringing a window back.
+const unmaximize_every_ms = 50;
+const unmaximize_tries = 20;
 const size_maximized: WPARAM = 2;
 
 const vk_shift: i32 = 0x10;
@@ -512,6 +520,8 @@ const User32 = struct {
     SetWindowPos: *const fn (HWND, ?HWND, i32, i32, i32, i32, u32) callconv(.winapi) i32,
     IsIconic: *const fn (HWND) callconv(.winapi) i32,
     IsZoomed: *const fn (HWND) callconv(.winapi) i32,
+    SetTimer: *const fn (?HWND, usize, u32, ?*const anyopaque) callconv(.winapi) usize,
+    KillTimer: *const fn (?HWND, usize) callconv(.winapi) i32,
     GetWindowPlacement: *const fn (HWND, *WindowPlacement) callconv(.winapi) i32,
     SetWindowPlacement: *const fn (HWND, *const WindowPlacement) callconv(.winapi) i32,
     MonitorFromWindow: *const fn (HWND, u32) callconv(.winapi) ?*anyopaque,
@@ -751,6 +761,11 @@ const Native = struct {
 
     iconified: bool = false,
     maximized: bool = false,
+    /// Asked back at its own size while minimised from maximised. Windows
+    /// brings it back maximised whatever it is told, and takes no new state
+    /// until it is done: when it is, a timer takes it down to its own size.
+    restore_to_normal: bool = false,
+    unmaximize_left: u8 = 0,
     /// The last real content area: Windows reports a minimised window as 0x0.
     fb_width: u32 = 0,
     fb_height: u32 = 0,
@@ -1897,13 +1912,10 @@ fn setState(impl: backend.Impl, native: backend.NativeWindow, wanted: backend.Wi
         .iconified => _ = self.u.ShowWindow(win.hwnd, sw_minimize),
         .maximized => _ = self.u.ShowWindow(win.hwnd, sw_maximize),
         .restored => {
-            // `SW_RESTORE` alone brings a window minimised from maximised back maximised.
-            var placement: WindowPlacement = .{};
-            if (self.u.GetWindowPlacement(win.hwnd, &placement) != 0) {
-                placement.flags &= ~wpf_restoretomaximized;
-                placement.show_cmd = sw_shownormal;
-                if (self.u.SetWindowPlacement(win.hwnd, &placement) != 0) return;
-            }
+            // A window minimised from maximised comes back maximised, and no
+            // placement it is given changes that: `wm_size` sees it come
+            // back, and takes it down to its own size.
+            win.restore_to_normal = self.u.IsIconic(win.hwnd) != 0 and restoresMaximised(self, win);
             _ = self.u.ShowWindow(win.hwnd, sw_restore);
         },
         .focused => {
@@ -1917,6 +1929,12 @@ fn setState(impl: backend.Impl, native: backend.NativeWindow, wanted: backend.Wi
         // works from the background.
         .attention => _ = self.u.FlashWindow(win.hwnd, 1),
     }
+}
+
+/// Whether a minimised window comes back maximised.
+fn restoresMaximised(self: *Impl, win: *Native) bool {
+    var placement: WindowPlacement = .{};
+    return self.u.GetWindowPlacement(win.hwnd, &placement) != 0 and placement.flags & wpf_restoretomaximized != 0;
 }
 
 fn getState(impl: backend.Impl, native: backend.NativeWindow, which: backend.WindowState) bool {
@@ -2511,6 +2529,13 @@ fn handle(
     const id = native.id;
 
     switch (message) {
+        wm_timer => {
+            if (wparam != unmaximize_timer) return null;
+            if (self.u.IsZoomed(hwnd) != 0 and self.u.IsIconic(hwnd) == 0) _ = self.u.ShowWindow(hwnd, sw_restore);
+            native.unmaximize_left -|= 1;
+            if (self.u.IsZoomed(hwnd) == 0 or native.unmaximize_left == 0) _ = self.u.KillTimer(hwnd, unmaximize_timer);
+            return 0;
+        },
         wm_close => {
             // Deliberately not destroying anything: a close is a request, and
             // the program decides. Returning 0 says "handled", which is what
@@ -2525,6 +2550,13 @@ fn handle(
         },
 
         wm_size => {
+            if (native.restore_to_normal and wparam != size_minimized) {
+                native.restore_to_normal = false;
+                if (wparam == size_maximized) {
+                    native.unmaximize_left = unmaximize_tries;
+                    _ = self.u.SetTimer(hwnd, unmaximize_timer, unmaximize_every_ms, null);
+                }
+            }
             const width: u32 = @intCast(lparam & 0xFFFF);
             const height: u32 = @intCast((lparam >> 16) & 0xFFFF);
             const iconified = wparam == size_minimized;
@@ -2867,10 +2899,7 @@ fn handle(
             return 0;
         },
 
-        wm_destroy => {
-            _ = hwnd;
-            return 0;
-        },
+        wm_destroy => return 0,
 
         else => return null,
     }
