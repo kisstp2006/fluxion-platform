@@ -1049,8 +1049,23 @@ fn translate(self: *Impl, record: *const wire.Record) void {
                 .x = record.x,
                 .y = record.y,
                 .double_click = pressed and doubleClick(self, id, button, record),
+                .from_touch = record.dx != 0,
             } });
         },
+
+        .touch => push(self, .{ .touch = .{
+            .window = id,
+            .finger = @bitCast(record.b),
+            .phase = switch (record.a) {
+                0 => .down,
+                1 => .move,
+                2 => .up,
+                else => .cancel,
+            },
+            .x = record.x,
+            .y = record.y,
+            .pressure = std.math.clamp(@as(f32, @floatCast(record.dx)), 0, 1),
+        } }),
 
         .safe_area => push(self, .{ .safe_area = .{
             .window = id,
@@ -1068,6 +1083,7 @@ fn translate(self: *Impl, record: *const wire.Record) void {
             .y = record.y,
             .dx = record.dx,
             .dy = record.dy,
+            .from_touch = record.a != 0,
         } }),
 
         .scroll => {
@@ -1599,6 +1615,36 @@ test "a second click soon and near is a double click, and a finger's may land fu
             for (expected) |double| {
                 try testing.expectEqual(double, queue.next().?.mouse_button.double_click);
             }
+            try testing.expectEqual(@as(?event.Event, null), queue.next());
+        }
+    }.run);
+}
+
+test "every finger is a touch of its own, and the first one's button and moves say they are a finger's" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            _ = native;
+            // The first finger touches: a touch, its move there and its button.
+            stub.queue(.{ .kind = .touch, .window = 1, .a = 0, .b = 11, .x = 10, .y = 20, .dx = 0.5 }, "");
+            stub.queue(.{ .kind = .cursor, .window = 1, .a = 1, .x = 10, .y = 20 }, "");
+            stub.queue(.{ .kind = .button, .window = 1, .a = 0, .b = 1, .d = 100, .x = 10, .y = 20, .dx = 1 }, "");
+            // A second is a touch alone, and moves, and is taken away.
+            stub.queue(.{ .kind = .touch, .window = 1, .a = 0, .b = 12, .x = 300, .y = 40, .dx = 2 }, "");
+            stub.queue(.{ .kind = .touch, .window = 1, .a = 1, .b = 12, .x = 310, .y = 45, .dx = 0.5 }, "");
+            stub.queue(.{ .kind = .touch, .window = 1, .a = 3, .b = 12, .x = 310, .y = 45 }, "");
+            try vtable.pump(impl, queue);
+
+            const first = queue.next().?.touch;
+            try testing.expectEqual(@as(u32, 11), first.finger);
+            try testing.expectEqual(event.TouchPhase.down, first.phase);
+            try testing.expectEqual(@as(f32, 0.5), first.pressure);
+            try testing.expect(queue.next().?.cursor.from_touch);
+            try testing.expect(queue.next().?.mouse_button.from_touch);
+            const second = queue.next().?.touch;
+            try testing.expectEqual(@as(u32, 12), second.finger);
+            try testing.expectEqual(@as(f32, 1), second.pressure);
+            try testing.expectEqual(event.TouchPhase.move, queue.next().?.touch.phase);
+            try testing.expectEqual(event.TouchPhase.cancel, queue.next().?.touch.phase);
             try testing.expectEqual(@as(?event.Event, null), queue.next());
         }
     }.run);

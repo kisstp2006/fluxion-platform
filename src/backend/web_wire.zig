@@ -37,7 +37,8 @@ pub const Kind = enum(u32) {
     /// a finger rather than a mouse or a pen did it.
     button = 3,
     /// The pointer moved. `x` and `y` in the drawing buffer's pixels, `dx` and
-    /// `dy` the motion.
+    /// `dy` the motion, and `a` 1 where a finger rather than a mouse or a pen
+    /// moved it.
     cursor = 4,
     /// A wheel turned. `a` is the DOM delta mode, `b` the modifier bits, `x`
     /// and `y` the deltas exactly as the browser reported them.
@@ -74,6 +75,11 @@ pub const Kind = enum(u32) {
     /// The page's safe-area insets changed. `a`, `b`, `c` and `d` are left,
     /// top, right and bottom, in the drawing buffer's pixels.
     safe_area = 18,
+    /// A finger on a touch screen, every one of them. `a` is what it did - 0
+    /// touched, 1 moved, 2 lifted, 3 taken by the browser - `b` the pointer's
+    /// id, `x` and `y` where it is in the drawing buffer's pixels, and `dx`
+    /// how hard it presses.
+    touch = 19,
     _,
 };
 
@@ -228,6 +234,7 @@ test "the event kinds are the numbers the glue sends" {
     try testing.expectEqual(16, @intFromEnum(Kind.dialog_begin));
     try testing.expectEqual(17, @intFromEnum(Kind.dialog_file));
     try testing.expectEqual(18, @intFromEnum(Kind.safe_area));
+    try testing.expectEqual(19, @intFromEnum(Kind.touch));
 }
 
 test "the window info is laid out the way the glue fills it" {

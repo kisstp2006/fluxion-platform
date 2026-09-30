@@ -242,6 +242,7 @@ test {
     // axis numbers, with nothing from the NDK in it, so it can be checked on
     // whichever machine the tests are actually run on.
     _ = @import("backend/android_gamepad.zig");
+    _ = @import("backend/android_touch.zig");
     // Same again: JNI table offsets are arithmetic, checkable anywhere.
     _ = @import("backend/jni.zig");
     _ = @import("backend/android_text.zig");

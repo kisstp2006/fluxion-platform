@@ -45,6 +45,7 @@ const input_mod = @import("../input.zig");
 const monitor = @import("../monitor.zig");
 const gamepad = @import("../gamepad.zig");
 const android_gamepad = @import("android_gamepad.zig");
+const android_touch = @import("android_touch.zig");
 const egl = @import("egl.zig");
 const gl = @import("../gl.zig");
 const vulkan = @import("../vulkan.zig");
@@ -159,6 +160,10 @@ const key_action_down: i32 = 0;
 const key_action_up: i32 = 1;
 
 const motion_action_mask: i32 = 0xff;
+/// Which finger a `pointer_down` or `pointer_up` is about, as an index into
+/// the event's fingers.
+const motion_action_pointer_index_mask: i32 = 0xff00;
+const motion_action_pointer_index_shift = 8;
 const motion_action_down: i32 = 0;
 const motion_action_up: i32 = 1;
 const motion_action_move: i32 = 2;
@@ -215,6 +220,10 @@ const Android = struct {
     AMotionEvent_getX: *const fn (*const AInputEvent, usize) callconv(.c) f32,
     AMotionEvent_getY: *const fn (*const AInputEvent, usize) callconv(.c) f32,
     AMotionEvent_getPointerCount: *const fn (*const AInputEvent) callconv(.c) usize,
+    /// A finger's number, the same from touch to lift, by its index in this
+    /// event.
+    AMotionEvent_getPointerId: *const fn (*const AInputEvent, usize) callconv(.c) i32,
+    AMotionEvent_getPressure: *const fn (*const AInputEvent, usize) callconv(.c) f32,
     /// Nanoseconds of `SystemClock.uptimeMillis`'s clock.
     AMotionEvent_getEventTime: *const fn (*const AInputEvent) callconv(.c) i64,
     /// Which device sent it and what kind of thing that device is, so a
@@ -690,7 +699,8 @@ const Impl = struct {
     native: ?*Native = null,
     queue: ?*backend.Queue = null,
     push_failed: bool = false,
-    clicks: backend.Clicks = .{},
+    /// The fingers down, and which is the mouse. See `android_touch`.
+    fingers: android_touch.Fingers = .{},
 
     /// OpenGL ES, through EGL. The only kind of GL an Android driver has.
     gl: egl.Backend = .{},
@@ -1340,9 +1350,9 @@ fn doubleClickTime(impl: backend.Impl) u32 {
     return double_tap_ms;
 }
 
-fn doubleTap(self: *Impl, id: event.WindowId, x: f64, y: f64, time_ms: u32) bool {
-    const slop: f64 = double_tap_dp * (readDensity(self) orelse 1);
-    return self.clicks.press(id, .left, x, y, time_ms, double_tap_ms, slop);
+/// How far off a second tap may land, in pixels.
+fn doubleTapSlop(self: *Impl) f64 {
+    return double_tap_dp * (readDensity(self) orelse 1);
 }
 
 /// `TextView`'s own blink.
@@ -1734,47 +1744,22 @@ fn translate(self: *Impl, input_event: *AInputEvent, id: event.WindowId) bool {
         },
 
         input_event_type_motion => {
-            const action = a.AMotionEvent_getAction(input_event) & motion_action_mask;
-            if (a.AMotionEvent_getPointerCount(input_event) == 0) return false;
-
-            const x: f64 = a.AMotionEvent_getX(input_event, 0);
-            const y: f64 = a.AMotionEvent_getY(input_event, 0);
+            const raw = a.AMotionEvent_getAction(input_event);
+            const action = raw & motion_action_mask;
+            const count = a.AMotionEvent_getPointerCount(input_event);
+            if (count == 0) return false;
+            const index: usize = @intCast((raw & motion_action_pointer_index_mask) >> motion_action_pointer_index_shift);
             const nanoseconds: u64 = @bitCast(a.AMotionEvent_getEventTime(input_event));
             const time_ms: u32 = @truncate(nanoseconds / std.time.ns_per_ms);
 
+            // Every finger its own events, and the first the mouse as well:
+            // see `android_touch`.
+            var sink: TouchSink = .{ .impl = self };
             switch (action) {
-                motion_action_down, motion_action_pointer_down => {
-                    // A second finger is no double tap, and ends any that was coming.
-                    const first = action == motion_action_down;
-                    if (!first) self.clicks = .{};
-                    // A touch is reported as the left button, so a program
-                    // written for a mouse works without knowing where it is.
-                    push(self, .{ .cursor = .{ .window = id, .x = x, .y = y, .dx = 0, .dy = 0 } });
-                    push(self, .{ .mouse_button = .{
-                        .window = id,
-                        .button = .left,
-                        .action = .press,
-                        .mods = .none,
-                        .x = x,
-                        .y = y,
-                        .double_click = first and doubleTap(self, id, x, y, time_ms),
-                    } });
-                },
-                motion_action_up, motion_action_pointer_up, motion_action_cancel => {
-                    if (action == motion_action_up) self.clicks.release(.left, time_ms);
-                    if (action == motion_action_cancel) self.clicks = .{};
-                    push(self, .{ .mouse_button = .{
-                        .window = id,
-                        .button = .left,
-                        .action = .release,
-                        .mods = .none,
-                        .x = x,
-                        .y = y,
-                    } });
-                },
-                motion_action_move => {
-                    push(self, .{ .cursor = .{ .window = id, .x = x, .y = y, .dx = 0, .dy = 0 } });
-                },
+                motion_action_down, motion_action_pointer_down => self.fingers.touched(&sink, id, fingerAt(&a, input_event, index), time_ms, doubleTapSlop(self)),
+                motion_action_move => for (0..count) |i| self.fingers.moved(&sink, id, fingerAt(&a, input_event, i)),
+                motion_action_up, motion_action_pointer_up => self.fingers.lifted(&sink, id, fingerAt(&a, input_event, index), time_ms),
+                motion_action_cancel => self.fingers.canceled(&sink, id),
                 else => return false,
             }
             return true;
@@ -1782,6 +1767,29 @@ fn translate(self: *Impl, input_event: *AInputEvent, id: event.WindowId) bool {
 
         else => return false,
     }
+}
+
+/// One finger of a motion event, by its index in it.
+fn fingerAt(a: *const Android, input_event: *const AInputEvent, index: usize) android_touch.Finger {
+    return .{
+        .id = @bitCast(a.AMotionEvent_getPointerId(input_event, index)),
+        .x = a.AMotionEvent_getX(input_event, index),
+        .y = a.AMotionEvent_getY(input_event, index),
+        .pressure = a.AMotionEvent_getPressure(input_event, index),
+    };
+}
+
+/// Where `android_touch` puts what the fingers did.
+const TouchSink = struct {
+    impl: *Impl,
+
+    pub fn push(self: *TouchSink, ev: event.Event) void {
+        pushEvent(self.impl, ev);
+    }
+};
+
+fn pushEvent(self: *Impl, ev: event.Event) void {
+    push(self, ev);
 }
 
 fn push(self: *Impl, ev: event.Event) void {

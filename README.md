@@ -40,8 +40,8 @@ all.
 | `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition, clipboard, file and folder dialogs, dropped files |
 | `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard, file and folder dialogs |
 | `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard, file and folder dialogs |
-| `android` | Activity lifecycle, surface create and loss, focus, keys, touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard, file and folder dialogs (with `FluxionActivity`) |
-| `web` | Canvas, both loop models, keyboard, text and composition, mouse, touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard, file and folder dialogs |
+| `android` | Activity lifecycle, surface create and loss, focus, keys, multi-touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard, file and folder dialogs (with `FluxionActivity`) |
+| `web` | Canvas, both loop models, keyboard, text and composition, mouse, multi-touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard, file and folder dialogs |
 | `none` | Compiles and runs everywhere, makes no windows |
 | `other` | A windowing system the caller supplies to `Context.initWith`. Never selected by this library, since it does not know how to open it |
 
@@ -293,6 +293,16 @@ rule, on Android and on a page: 300 ms from the first lift, within 100 dp. The
 two times behind a text field are there to ask: `ctx.doubleClickTime()` and
 `ctx.caretBlinkTime()`, how long a caret shows before it hides, null where the
 user turned blinking off.
+
+**Every finger is its own `touch` event**, on Android and on a page: the
+finger's number - the same from touch to lift - where it is and how hard it
+presses, as it touches, moves, is lifted, or is taken back by the system
+(`cancel`). **The first finger is the mouse as well**: the one that touches
+when no other is down also moves the cursor and holds the left button, those
+events marked `from_touch`, so what is made for a mouse works under a finger.
+A second finger is never the mouse, and a first lifted while others stay down
+leaves none until every finger is up. Windows, X11 and Wayland send no
+`touch` yet: Windows makes a mouse of a finger itself.
 
 ## A key is not a letter
 

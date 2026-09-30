@@ -100,6 +100,9 @@ pub const MouseButtonEvent = struct {
     /// The press that makes a double click, or a finger's double tap, by the
     /// system's own rule where it has one. A third press starts again.
     double_click: bool = false,
+    /// Made by the first finger on a touch screen, not by a mouse. See
+    /// `TouchEvent`.
+    from_touch: bool = false,
 };
 
 /// The usable part of a window changed, in the framebuffer's pixels. See
@@ -126,6 +129,45 @@ pub const CursorEvent = struct {
     y: f64,
     dx: f64,
     dy: f64,
+    /// Made by the first finger on a touch screen, not by a mouse. See
+    /// `TouchEvent`.
+    from_touch: bool = false,
+};
+
+/// What a finger did. See `TouchEvent`.
+pub const TouchPhase = enum {
+    /// It touched the screen.
+    down,
+    /// It moved while it touched.
+    move,
+    /// It was lifted.
+    up,
+    /// The system took it - a gesture of its own, the app sent away. Lifted,
+    /// and whatever it was doing should not happen.
+    cancel,
+};
+
+/// A finger on a touch screen.
+///
+/// **Every finger, as its own events.** `finger` names one from the moment
+/// it touches to the moment it is lifted; another may have the same number
+/// afterwards. Positions are content-area coordinates, as a `CursorEvent`'s.
+///
+/// **The first finger is the mouse as well.** A finger that touches when no
+/// other is down also moves the cursor and holds the left button - the
+/// `cursor` and `mouse_button` events a mouse would send, marked
+/// `from_touch` - until it is lifted, so what is made for a mouse works under
+/// a finger. A second finger is never the mouse, and a first lifted while
+/// others stay down leaves no mouse until every one is up.
+pub const TouchEvent = struct {
+    window: WindowId,
+    finger: u32,
+    phase: TouchPhase,
+    x: f64,
+    y: f64,
+    /// How hard it presses, from nought to one; where a screen cannot tell,
+    /// what the system says for a finger that touches.
+    pressure: f32 = 1,
 };
 
 /// A wheel or a trackpad. `y` is the usual vertical wheel; `x` is the
@@ -246,6 +288,9 @@ pub const Event = union(enum) {
     mouse_button: MouseButtonEvent,
     cursor: CursorEvent,
     scroll: ScrollEvent,
+    /// A finger on a touch screen: Android's and a browser's. See
+    /// `TouchEvent`.
+    touch: TouchEvent,
     drop: DropEvent,
     file_dialog: FileDialogEvent,
 
@@ -325,6 +370,7 @@ test "every event says which window it is about" {
     } }).window());
     try testing.expectEqual(id, (Event{ .scale = .{ .window = id, .x = 2, .y = 2 } }).window());
     try testing.expectEqual(id, (Event{ .file_dialog = .{ .window = id, .id = @enumFromInt(1), .paths = &.{} } }).window());
+    try testing.expectEqual(id, (Event{ .touch = .{ .window = id, .finger = 2, .phase = .down, .x = 1, .y = 1 } }).window());
 }
 
 test "the process-wide events belong to no window" {
@@ -350,6 +396,7 @@ test "a switch over events compiles for every case" {
         .mouse_button => "button",
         .cursor => "cursor",
         .scroll => "scroll",
+        .touch => "touch",
         .drop => "drop",
         .file_dialog => "file dialog",
         .surface_lost, .surface_created => "surface",

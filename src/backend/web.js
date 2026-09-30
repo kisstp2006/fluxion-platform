@@ -64,6 +64,7 @@ const KIND = {
   dialogBegin: 16,
   dialogFile: 17,
   safeArea: 18,
+  touch: 19,
 };
 
 /// `Record`: kind, window, a, b, c, d as 32-bit integers from offset 0, then
@@ -1416,7 +1417,7 @@ export class Platform {
     canvas.addEventListener("pointerdown", (event) => this.pointerDown(win, event), options);
     canvas.addEventListener("pointermove", (event) => this.pointerMove(win, event), options);
     canvas.addEventListener("pointerup", (event) => this.pointerUp(win, event), options);
-    canvas.addEventListener("pointercancel", (event) => this.buttonsTo(win, 0, 0, event), options);
+    canvas.addEventListener("pointercancel", (event) => this.pointerCancel(win, event), options);
     canvas.addEventListener(
       "pointerenter",
       (event) => {
@@ -1564,8 +1565,9 @@ export class Platform {
   }
 
   pointerDown(win, event) {
-    // One pointer is the mouse. A second finger is not a second mouse, and
-    // there is no event in the library for it to be.
+    // Every finger is a touch of its own; the first is the mouse as well, and
+    // a second finger is not a second mouse.
+    if (event.pointerType === "touch") this.touch(win, event, 0);
     if (event.pointerType === "touch" && !event.isPrimary) return;
     this.gesture();
     // No text selection, and no focus change of the browser's choosing: the
@@ -1583,6 +1585,7 @@ export class Platform {
   }
 
   pointerMove(win, event) {
+    if (event.pointerType === "touch") this.touch(win, event, 1);
     if (event.pointerType === "touch" && !event.isPrimary) return;
     this.moved(win, event, true);
     // A second button pressed during a drag arrives as a move, not a down.
@@ -1590,6 +1593,7 @@ export class Platform {
   }
 
   pointerUp(win, event) {
+    if (event.pointerType === "touch") this.touch(win, event, 2);
     if (event.pointerType === "touch" && !event.isPrimary) return;
     if (event.pointerType === "touch") {
       // Safari raises a phone's keyboard only for a field focused inside a
@@ -1602,6 +1606,19 @@ export class Platform {
     }
     this.moved(win, event, false);
     this.buttonsTo(win, event.buttons, modsOf(event), event);
+  }
+
+  pointerCancel(win, event) {
+    if (event.pointerType === "touch") this.touch(win, event, 3);
+    if (event.pointerType === "touch" && !event.isPrimary) return;
+    this.buttonsTo(win, 0, 0, event);
+  }
+
+  /// One finger, whichever it is: `phase` 0 touched, 1 moved, 2 lifted, 3
+  /// taken by the browser.
+  touch(win, event, phase) {
+    const [x, y] = this.local(win, event);
+    this.queue({ kind: KIND.touch, win: win.id, a: phase, b: event.pointerId | 0, x, y, dx: event.pressure ?? 1 });
   }
 
   moved(win, event, report) {
@@ -1627,7 +1644,7 @@ export class Platform {
     win.lastY = y;
     win.hasPosition = true;
     if (report && (first || dx !== 0 || dy !== 0)) {
-      this.queue({ kind: KIND.cursor, win: win.id, x, y, dx, dy });
+      this.queue({ kind: KIND.cursor, win: win.id, a: event.pointerType === "touch" ? 1 : 0, x, y, dx, dy });
     }
   }
 
