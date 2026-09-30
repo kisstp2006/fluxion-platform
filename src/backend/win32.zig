@@ -460,6 +460,9 @@ const User32 = struct {
     /// a pointer's type - `MAKEINTRESOURCE`. Untyped, because half the ids are
     /// odd addresses and a `u16` pointer may not be.
     LoadCursorW: *const fn (?HINSTANCE, ?*const anyopaque) callconv(.winapi) ?HCURSOR,
+    /// An icon of a module's resources at the size asked, named as
+    /// `LoadCursorW` names one.
+    LoadImageW: *const fn (?HINSTANCE, ?*const anyopaque, u32, i32, i32, u32) callconv(.winapi) ?*anyopaque,
     /// A cursor of the program's own, from two bitmaps and a hotspot, and the
     /// way to destroy one: a cursor made this way is an icon as far as the
     /// system is concerned.
@@ -550,6 +553,10 @@ const User32 = struct {
 
 const Kernel32 = struct {
     GetModuleHandleW: *const fn (?[*:0]const u16) callconv(.winapi) ?HINSTANCE,
+    /// Each resource of one kind a module has, in the order its resource
+    /// directory keeps them - names, then numbers - until the callback
+    /// returns 0.
+    EnumResourceNamesW: *const fn (?HINSTANCE, ?*const anyopaque, EnumResourceName, isize) callconv(.winapi) i32,
     /// The clipboard takes its text as a movable global block, which it then
     /// owns - the one allocator it will accept.
     GlobalAlloc: *const fn (u32, usize) callconv(.winapi) ?*anyopaque,
@@ -639,6 +646,47 @@ const icon_big: WPARAM = 1;
 const sm_cxicon: i32 = 11;
 const sm_cxsmicon: i32 = 49;
 
+/// `RT_GROUP_ICON`: an icon, as the list of its sizes a program is given.
+const rt_group_icon: usize = 14;
+/// `IMAGE_ICON`, for `LoadImageW`.
+const image_icon: u32 = 1;
+
+const EnumResourceName = *const fn (?HINSTANCE, ?*const anyopaque, ?*const anyopaque, isize) callconv(.winapi) i32;
+
+/// The program's own icon at the two sizes Windows draws one.
+const ProgramIcons = struct {
+    big: ?HICON = null,
+    small: ?HICON = null,
+};
+
+/// The first icon among `module`'s resources - the one Explorer shows for
+/// its file - at the large and the small size. Both null when it has none.
+fn programIcons(u: User32, k: Kernel32, module: HINSTANCE) ProgramIcons {
+    const Finding = struct {
+        u: User32,
+        big_side: i32,
+        small_side: i32,
+        found: ProgramIcons = .{},
+
+        /// A name lasts only for the call, so the icon is loaded here, from the
+        /// first; 0 stops the walk.
+        fn first(found_in: ?HINSTANCE, kind: ?*const anyopaque, name: ?*const anyopaque, context: isize) callconv(.winapi) i32 {
+            _ = kind;
+            const self: *@This() = @ptrFromInt(@as(usize, @bitCast(context)));
+            self.found.big = @ptrCast(self.u.LoadImageW(found_in, name, image_icon, self.big_side, self.big_side, 0));
+            self.found.small = @ptrCast(self.u.LoadImageW(found_in, name, image_icon, self.small_side, self.small_side, 0));
+            return 0;
+        }
+    };
+    var finding: Finding = .{
+        .u = u,
+        .big_side = @max(1, u.GetSystemMetrics(sm_cxicon)),
+        .small_side = @max(1, u.GetSystemMetrics(sm_cxsmicon)),
+    };
+    _ = k.EnumResourceNamesW(module, @ptrFromInt(rt_group_icon), Finding.first, @bitCast(@intFromPtr(&finding)));
+    return finding.found;
+}
+
 /// Windows 8.1 and later. Before it every monitor is 96 DPI as far as this
 /// library can tell, which is what the machine was anyway.
 const Shcore = struct {
@@ -695,6 +743,9 @@ const Impl = struct {
     k: Kernel32,
     instance: HINSTANCE,
     atom: u16,
+    /// The executable's own icon, which the window class shows for a window
+    /// that has none; destroyed after the class.
+    program_icon: ProgramIcons,
     /// Null on a machine that has neither, which costs a monitor's physical
     /// size and its per-monitor scale and nothing else.
     /// Controllers, which are not a windowing-system idea at all: XInput is a
@@ -858,6 +909,7 @@ pub const vtable: backend.Vtable = .{
     .setCursorShape = setCursorShape,
     .setCursorImage = setCursorImage,
     .setIcon = setIcon,
+    .programIcon = programIcon,
     .safeArea = safeArea,
     .position = position,
     .setPosition = setPosition,
@@ -892,6 +944,10 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         _ = aware(dpi_per_monitor_v2);
     }
 
+    // A window with no picture of its own shows the program's, where the
+    // title bar, the task bar and alt-tab look for one.
+    const program_icon = programIcons(u, k, instance);
+    errdefer freeProgramIcons(u, program_icon);
     const class: WndClassExW = .{
         .size = @sizeOf(WndClassExW),
         .style = cs_hredraw | cs_vredraw | cs_owndc | cs_dblclks,
@@ -899,12 +955,12 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .cls_extra = 0,
         .wnd_extra = 0,
         .instance = instance,
-        .icon = null,
+        .icon = program_icon.big,
         .cursor = u.LoadCursorW(null, idc_arrow),
         .background = null,
         .menu_name = null,
         .class_name = class_name,
-        .icon_small = null,
+        .icon_small = program_icon.small,
     };
     const atom = u.RegisterClassExW(&class);
     if (atom == 0) return error.ConnectionFailed;
@@ -958,9 +1014,20 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .k = k,
         .instance = instance,
         .atom = atom,
+        .program_icon = program_icon,
         .answers = .init(gpa),
     };
     return self;
+}
+
+/// The class's icons go after the class: it uses them until then.
+fn freeProgramIcons(u: User32, icons: ProgramIcons) void {
+    if (icons.big) |one| _ = u.DestroyIcon(@ptrCast(one));
+    if (icons.small) |one| _ = u.DestroyIcon(@ptrCast(one));
+}
+
+fn programIcon(impl: backend.Impl) bool {
+    return cast(impl).program_icon.big != null;
 }
 
 fn deinit(impl: backend.Impl, gpa: Allocator) void {
@@ -971,6 +1038,7 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     // The text stays on the clipboard: it was handed over, not lent.
     if (self.clipboard_owner) |hwnd| _ = self.u.DestroyWindow(hwnd);
     _ = self.u.UnregisterClassW(class_name, self.instance);
+    freeProgramIcons(self.u, self.program_icon);
     self.pads.close();
     self.gl.close();
     if (self.imm32) |*lib| lib.close();
@@ -3655,6 +3723,22 @@ test "a confined and hidden pointer is held and unseen only while the window has
     try vtable.setCursorImage(impl, win, null);
     try testing.expectEqual(@as(?HCURSOR, null), win.image);
     try testing.expectEqual(win.shape, pointerShape(cast(impl), win));
+}
+
+test "a program's icon is the first among its resources, at both sizes, and a test has none" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    // A test program has no resources.
+    try testing.expect(!vtable.programIcon(impl));
+
+    // user32.dll has the system's own icons among its.
+    const user32 = self.k.GetModuleHandleW(std.unicode.utf8ToUtf16LeStringLiteral("user32.dll")) orelse return error.SkipZigTest;
+    const found = programIcons(self.u, self.k, user32);
+    defer freeProgramIcons(self.u, found);
+    try testing.expect(found.big != null);
+    try testing.expect(found.small != null);
+    try testing.expect(found.big != found.small);
 }
 
 test "an icon is set in both sizes, and an empty list takes them away" {

@@ -11,7 +11,8 @@
 //! program that has one drawing at 16, 32 and 48 pixels should pass all three.
 //!
 //! **An empty list puts the system's own back**, which is the executable's
-//! icon on Windows and the desktop file's everywhere else.
+//! icon on Windows - the first among its resources, when it has one; see
+//! `Context.programIcon` - and the desktop file's everywhere else.
 //!
 //! Where a window's icon is not the window's to set, the call says so:
 //! `error.Unavailable` on Android, which has no window decoration to put one

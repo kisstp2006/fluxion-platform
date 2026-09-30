@@ -248,6 +248,12 @@ pub const Vtable = struct {
     /// list puts the system's own back. The pixels last only for the call.
     setIcon: *const fn (impl: Impl, native: NativeWindow, images: []const icon.Image) Error!void,
 
+    /// Whether the program file carries a picture of its own, which a window
+    /// shows until it is given another. Only a Windows executable can: every
+    /// other system takes a window's picture from the program or a desktop
+    /// file.
+    programIcon: *const fn (impl: Impl) bool = noProgramIcon,
+
     /// The edges the system draws over - a notch, a gesture bar - in the
     /// framebuffer's pixels. Zero on every desktop. A backend that can change
     /// them also pushes `.safe_area` when they do.
@@ -407,6 +413,11 @@ pub const Vtable = struct {
     /// no handle to give.
     nativeHandle: *const fn (impl: Impl, native: NativeWindow) usize,
 };
+
+fn noProgramIcon(impl: Impl) bool {
+    _ = impl;
+    return false;
+}
 
 /// The events one pump produced, in the order the system reported them.
 ///

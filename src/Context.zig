@@ -661,6 +661,14 @@ pub fn keepAwake(self: *const Context) bool {
     return self.keep_awake;
 }
 
+/// Whether the program file has a picture of its own, which every window
+/// shows until `Window.setIcon` gives it another, and gets back from an empty
+/// list: an icon among a Windows executable's resources. False on every
+/// other system, where a window's picture is the program's to give.
+pub fn programIcon(self: *const Context) bool {
+    return self.vtable.programIcon(self.impl);
+}
+
 // -------------------------------------------------------------------------
 // Used by Window, which is the public face of these
 // -------------------------------------------------------------------------
