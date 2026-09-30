@@ -91,6 +91,7 @@ const AInputQueue = opaque {};
 const AInputEvent = opaque {};
 const ALooper = opaque {};
 const AAssetManager = opaque {};
+const AAsset = opaque {};
 const ARect = extern struct {
     left: i32,
     top: i32,
@@ -623,6 +624,39 @@ fn liveActivity() ?*ANativeActivity {
 pub fn storagePaths() ?struct { internal: ?[*:0]const u8, external: ?[*:0]const u8 } {
     const activity = liveActivity() orelse return null;
     return .{ .internal = activity.internalDataPath, .external = activity.externalDataPath };
+}
+
+/// `AASSET_MODE_RANDOM`: the asset is read in no particular order.
+const asset_mode_random: c_int = 1;
+
+/// For `bundle`: an uncompressed asset as the APK's own file and where in it
+/// the asset lies. The asset manager is asked through `libandroid` the way
+/// the rest of this backend asks it.
+pub fn bundledFile(name: [:0]const u8) @import("../bundle.zig").Error!@import("../bundle.zig").Bundled {
+    const activity = liveActivity() orelse return error.NotFound;
+    const assets = activity.assetManager orelse return error.NotFound;
+    var lib = dyn.Library.openAny(candidates) catch return error.Unsupported;
+    defer lib.close();
+    const open_asset = lib.lookup(*const fn (*AAssetManager, [*:0]const u8, c_int) callconv(.c) ?*AAsset, "AAssetManager_open") orelse
+        return error.Unsupported;
+    const descriptor = lib.lookup(*const fn (*AAsset, *i64, *i64) callconv(.c) c_int, "AAsset_openFileDescriptor64") orelse
+        return error.Unsupported;
+    const close_asset = lib.lookup(*const fn (*AAsset) callconv(.c) void, "AAsset_close") orelse
+        return error.Unsupported;
+
+    const asset = open_asset(assets, name.ptr, asset_mode_random) orelse return error.NotFound;
+    defer close_asset(asset);
+    var start: i64 = 0;
+    var len: i64 = 0;
+    // A descriptor of its own, which outlives the asset; none for an asset
+    // the APK holds compressed.
+    const fd = descriptor(asset, &start, &len);
+    if (fd < 0) return error.Compressed;
+    return .{
+        .file = .{ .handle = fd, .flags = .{ .nonblocking = false } },
+        .start = @intCast(start),
+        .len = @intCast(len),
+    };
 }
 
 /// For `shell`, from whichever thread asks: attached to the VM for the call

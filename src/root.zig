@@ -86,6 +86,9 @@ pub const folders = @import("folders.zig");
 pub const fonts = @import("fonts.zig");
 /// A file, a folder or an address handed to the system. See `shell`.
 pub const shell = @import("shell.zig");
+/// A file that came inside the program's own package, read where it lies.
+/// See `bundle`.
+pub const bundle = @import("bundle.zig");
 /// The console and the panic handler a browser build needs. See `web`.
 pub const web = @import("web.zig");
 /// The person's language and region, how dates and times are written there,
@@ -202,6 +205,7 @@ test {
     _ = folders;
     _ = fonts;
     _ = shell;
+    _ = bundle;
     _ = culture;
     _ = @import("backend/unix_shell.zig");
     _ = @import("backend/kdeglobals.zig");

@@ -23,6 +23,7 @@ Windows, input and the event loop, on whatever this machine has. For Zig 0.16.
 | `folders` | Home, documents, and where a program keeps its settings, its data and its cache - the system's own answer. |
 | `fonts` | The fonts the system draws its own interface and its own code in, as files a font library can open. |
 | `shell` | A file, a folder or an address handed to the system: opened, or shown in the file manager. |
+| `bundle` | A file that came inside the program's own package - an APK's asset - read where it lies. |
 | `culture` | The person's language and region, how dates, times and spans of time are written there, and the time zone - the system's own ICU asked. |
 | `web` | What a browser build needs and `std` cannot give it: a console, a panic that says what it was, and the bytes of a dropped file. |
 | `backend` | What a windowing system has to answer to — the seam a new backend is written against, and the `Opener` that says how to open one. |
@@ -753,6 +754,17 @@ No desktop backend ever sends either. A program written to handle them is
 correct on a phone and unchanged on a PC — and the reverse cannot happen
 quietly, which is the point of putting them in the union that every `switch`
 sees.
+
+A phone's program also comes with its files inside it: the APK. `bundle.open`
+gives one of its assets as the APK's own file and the range of it the asset
+is, so it is read with positional reads, or mapped, and never copied out. That
+holds for an asset the APK stores as it is; one compressed into the APK is
+`error.Compressed`. A desktop has no package, and says `error.Unsupported`.
+
+```zig
+const pack = try platform.bundle.open("game.fxpack");   // assets/game.fxpack
+defer pack.file.close(io);
+```
 
 ## A browser owns the loop
 
