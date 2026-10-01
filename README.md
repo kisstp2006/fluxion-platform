@@ -302,7 +302,10 @@ when no other is down also moves the cursor and holds the left button, those
 events marked `from_touch`, so what is made for a mouse works under a finger.
 A second finger is never the mouse, and a first lifted while others stay down
 leaves none until every finger is up. Windows, X11 and Wayland send no
-`touch` yet: Windows makes a mouse of a finger itself.
+`touch` yet: Windows makes a mouse of a finger itself. A precision
+touchpad's pinch reaches a Windows program as the wheel turned with Ctrl,
+and a browser's as a wheel event with Ctrl too: `scroll` with
+`mods.control`, whether or not the key is down.
 
 ## A key is not a letter
 

@@ -423,6 +423,8 @@ const vk_processkey: WPARAM = 0xE5;
 const mapvk_vk_to_vsc: u32 = 0;
 
 const wheel_delta: f64 = 120.0;
+/// `MK_CONTROL`: Ctrl, in a mouse message's own key state.
+const mk_control: WPARAM = 0x0008;
 
 /// The `user32.dll` entry points this backend needs.
 ///
@@ -2928,11 +2930,16 @@ fn handle(
         wm_mousewheel, wm_mousehwheel => {
             const raw: i16 = @truncate(@as(isize, @bitCast(wparam >> 16)));
             const amount = @as(f64, @floatFromInt(raw)) / wheel_delta;
+            // A precision touchpad's pinch comes as the wheel turned with
+            // Ctrl, which the message's own key state says whether or not
+            // the keyboard's state does.
+            var mods = readMods(self);
+            if (wparam & mk_control != 0) mods.control = true;
             push(self, .{ .scroll = .{
                 .window = id,
                 .x = if (message == wm_mousehwheel) amount else 0,
                 .y = if (message == wm_mousewheel) amount else 0,
-                .mods = readMods(self),
+                .mods = mods,
             } });
             return 0;
         },
@@ -3617,6 +3624,34 @@ fn postAndPump(impl: backend.Impl, queue: *backend.Queue, win: *Native, message:
     queue.clear();
     try testing.expect(cast(impl).u.PostMessageW(win.hwnd, message, wparam, lparam) != 0);
     try vtable.pump(impl, queue);
+}
+
+test "a wheel turned with Ctrl in the message's own key state is a Ctrl wheel, as a touchpad's pinch is sent" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const id: event.WindowId = @enumFromInt(5);
+    const win = try hiddenWindow(impl, id);
+    defer vtable.destroyWindow(impl, testing.allocator, win);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+    try vtable.pump(impl, &queue);
+
+    // Two notches up, Ctrl in the message; nobody holds the key.
+    try postAndPump(impl, &queue, win, wm_mousewheel, (@as(WPARAM, 240) << 16) | mk_control, 0);
+    const pinched = scrollIn(&queue).?;
+    try testing.expectEqual(@as(f64, 2), pinched.y);
+    try testing.expect(pinched.mods.control);
+
+    try postAndPump(impl, &queue, win, wm_mousewheel, @as(WPARAM, 120) << 16, 0);
+    try testing.expect(!scrollIn(&queue).?.mods.control);
+}
+
+fn scrollIn(queue: *backend.Queue) ?event.ScrollEvent {
+    while (queue.next()) |ev| switch (ev) {
+        .scroll => |s| return s,
+        else => {},
+    };
+    return null;
 }
 
 test "minimising is one iconify and no size, and coming back says what it left" {
