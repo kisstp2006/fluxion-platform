@@ -46,6 +46,7 @@ const cursor_mod = @import("../cursor.zig");
 const icon_mod = @import("../icon.zig");
 const insets_mod = @import("../insets.zig");
 const clipboard = @import("clipboard.zig");
+const uri_list = @import("uri_list.zig");
 const linux_dialog = @import("linux_dialog.zig");
 
 const Error = platform.Error;
@@ -910,9 +911,13 @@ const Impl = struct {
     clipboard_text: std.ArrayListUnmanaged(u8) = .empty,
     owns_clipboard: bool = false,
 
+    /// Files dragged in from other programs: see `Dnd`.
+    dnd: Dnd,
+
     /// The file dialog that is open, whose end `pump` looks for.
     dialog: ?*linux_dialog.Dialog = null,
-    /// What the last dialog's answer carried, kept until the next pump.
+    /// What the last dialog's answer and the last drop carried, kept until
+    /// the next pump.
     answers: std.heap.ArenaAllocator,
 };
 
@@ -936,6 +941,66 @@ const Selection = struct {
     save_targets: Atom,
     /// Where an owner is asked to put what it sends.
     property: Atom,
+};
+
+/// Files dragged in from another program, in the protocol X programs share
+/// for it: XDND, version 5. A window says it takes drops in its `XdndAware`
+/// property. The drag's source names what it has (`XdndEnter`), says where
+/// the pointer is (`XdndPosition`, answered with `XdndStatus`) and lets go
+/// (`XdndDrop`); the window then asks for the files as `text/uri-list`,
+/// which the source writes as a selection's answer, and says it has them
+/// (`XdndFinished`).
+const Dnd = struct {
+    aware: Atom,
+    enter: Atom,
+    position: Atom,
+    status: Atom,
+    leave: Atom,
+    drop: Atom,
+    finished: Atom,
+    /// `XdndSelection`: the selection the files are asked for through, and
+    /// the property of the window they are written into.
+    selection: Atom,
+    type_list: Atom,
+    action_copy: Atom,
+    uri_list: Atom,
+
+    /// The drag over one of this program's windows - its source, that
+    /// window, the protocol's version the source speaks, whether it offers
+    /// files, and where in the window the pointer last was - or nought for
+    /// none.
+    source: Window = 0,
+    target: Window = 0,
+    version: c_long = 0,
+    has_files: bool = false,
+    x: f64 = 0,
+    y: f64 = 0,
+
+    /// The newest version spoken here, which a window says in `XdndAware`.
+    const newest: c_long = 5;
+
+    fn init(x: Xlib, display: *Display) Dnd {
+        return .{
+            .aware = x.XInternAtom(display, "XdndAware", 0),
+            .enter = x.XInternAtom(display, "XdndEnter", 0),
+            .position = x.XInternAtom(display, "XdndPosition", 0),
+            .status = x.XInternAtom(display, "XdndStatus", 0),
+            .leave = x.XInternAtom(display, "XdndLeave", 0),
+            .drop = x.XInternAtom(display, "XdndDrop", 0),
+            .finished = x.XInternAtom(display, "XdndFinished", 0),
+            .selection = x.XInternAtom(display, "XdndSelection", 0),
+            .type_list = x.XInternAtom(display, "XdndTypeList", 0),
+            .action_copy = x.XInternAtom(display, "XdndActionCopy", 0),
+            .uri_list = x.XInternAtom(display, uri_list.mime, 0),
+        };
+    }
+
+    fn forget(self: *Dnd) void {
+        self.source = 0;
+        self.target = 0;
+        self.version = 0;
+        self.has_files = false;
+    }
 };
 
 const Native = struct {
@@ -1096,6 +1161,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
         .net_wm_icon = x.XInternAtom(display, "_NET_WM_ICON", 0),
         .net_workarea = x.XInternAtom(display, "_NET_WORKAREA", 0),
         .wm_state = x.XInternAtom(display, "WM_STATE", 0),
+        .dnd = .init(x, display),
         .scale = readScale(x, display),
         .double_click_ms = kdeglobals.doubleClickTime(),
         .caret_blink_ms = kdeglobals.caretBlinkTime(),
@@ -1260,6 +1326,10 @@ fn createWindow(
     var protocols = [_]Atom{self.wm_delete_window};
     _ = x.XSetWMProtocols(self.display, window, &protocols, 1);
 
+    // Files dragged in from another program: see `Dnd`.
+    const dnd_version = [_]c_long{Dnd.newest};
+    _ = x.XChangeProperty(self.display, window, self.dnd.aware, xa_atom, 32, prop_mode_replace, @ptrCast(&dnd_version), 1);
+
     try setWindowTitle(self, window, desc.title);
 
     if (!desc.resizable) setNormalHints(self, window, false, .{}, .{ desc.width, desc.height });
@@ -1353,6 +1423,7 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
     if (win.blank != 0) _ = self.x.XFreeCursor(self.display, win.blank);
     if (win.image != 0) _ = self.x.XFreeCursor(self.display, win.image);
 
+    if (self.dnd.target == win.window) self.dnd.forget();
     _ = self.windows.swapRemove(win.window);
     _ = self.x.XDestroyWindow(self.display, win.window);
     _ = self.x.XFlush(self.display);
@@ -2500,6 +2571,107 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
 
 /// Up to `into.len` values of a format-32 property. Xlib hands those back as
 /// `long`s, eight bytes each on a 64-bit machine.
+/// What a drag from another program says to the window it is over: see
+/// `Dnd`. A message from any other source than the drag's is not for it.
+fn dragMessage(self: *Impl, native: *Native, message: *const XClientMessageEvent) void {
+    const dnd = &self.dnd;
+    const source: Window = @bitCast(message.data.l[0]);
+    if (message.message_type == dnd.enter) {
+        dnd.source = source;
+        dnd.target = native.window;
+        dnd.version = (message.data.l[1] >> 24) & 0xff;
+        dnd.has_files = offersFiles(self, source, message);
+        return;
+    }
+    if (source != dnd.source or native.window != dnd.target) return;
+    if (message.message_type == dnd.position) {
+        // The root's coordinates, sixteen bits each.
+        const at: c_ulong = @bitCast(message.data.l[2]);
+        var x: c_int = 0;
+        var y: c_int = 0;
+        var child: Window = 0;
+        _ = self.x.XTranslateCoordinates(self.display, self.root, native.window, @intCast((at >> 16) & 0xffff), @intCast(at & 0xffff), &x, &y, &child);
+        dnd.x = @floatFromInt(x);
+        dnd.y = @floatFromInt(y);
+        // Taken where files are offered, and told every move, with no
+        // rectangle the pointer could stay in unheard.
+        const accepted: c_long = if (dnd.has_files) 1 else 0;
+        const action: c_long = if (dnd.has_files) @bitCast(dnd.action_copy) else 0;
+        sendDnd(self, source, dnd.status, .{ @bitCast(native.window), accepted | 2, 0, 0, action });
+    } else if (message.message_type == dnd.leave) {
+        dnd.forget();
+    } else if (message.message_type == dnd.drop) {
+        if (!dnd.has_files) {
+            finishDrop(self, false);
+            return;
+        }
+        // The files are asked for at the drop's own time, which the source
+        // keeps the selection under; the answer comes as `SelectionNotify`.
+        const time: Time = if (dnd.version >= 1) @bitCast(message.data.l[2]) else current_time;
+        _ = self.x.XDeleteProperty(self.display, native.window, dnd.selection);
+        _ = self.x.XConvertSelection(self.display, dnd.selection, dnd.uri_list, dnd.selection, native.window, time);
+        _ = self.x.XFlush(self.display);
+    }
+}
+
+/// Whether a drag's source offers its files as `text/uri-list`: one of the
+/// three types `XdndEnter` names, or of the list on the source's window where
+/// it has more than three.
+fn offersFiles(self: *Impl, source: Window, message: *const XClientMessageEvent) bool {
+    const wanted: c_long = @bitCast(self.dnd.uri_list);
+    if (message.data.l[1] & 1 != 0) {
+        var types: [64]c_long = undefined;
+        for (readLongs(self, source, self.dnd.type_list, xa_atom, &types)) |kind| {
+            if (kind == wanted) return true;
+        }
+        return false;
+    }
+    for (message.data.l[2..5]) |kind| {
+        if (kind == wanted) return true;
+    }
+    return false;
+}
+
+/// The files a drop asked for, written by the drag's source: a `drop` event
+/// where it let go, and the source told whether they were taken.
+fn dropArrived(self: *Impl, native: *Native, notice: *const XSelectionEvent, queue: *backend.Queue) Error!void {
+    const dnd = &self.dnd;
+    if (notice.selection != dnd.selection or dnd.source == 0 or native.window != dnd.target) return;
+    defer dnd.forget();
+    var text: std.ArrayListUnmanaged(u8) = .empty;
+    defer text.deinit(self.gpa);
+    const read = notice.property != 0 and (try readProperty(self, native.window, notice.property, &text, self.gpa)) != null;
+    const paths = if (read) try uri_list.paths(self.answers.allocator(), text.items) else &.{};
+    finishDrop(self, paths.len > 0);
+    if (paths.len > 0) try queue.push(.{ .drop = .{ .window = native.id, .paths = paths, .x = dnd.x, .y = dnd.y } });
+}
+
+/// `XdndFinished`: the drop is over, its files taken or not.
+fn finishDrop(self: *Impl, taken: bool) void {
+    const dnd = &self.dnd;
+    const action: c_long = if (taken) @bitCast(dnd.action_copy) else 0;
+    sendDnd(self, dnd.source, dnd.finished, .{ @bitCast(dnd.target), @intFromBool(taken), action, 0, 0 });
+    if (!taken) dnd.forget();
+}
+
+/// One of XDND's messages to the window `to`, which belongs to the drag's
+/// source.
+fn sendDnd(self: *Impl, to: Window, kind: Atom, data: [5]c_long) void {
+    var message: XEvent = std.mem.zeroes(XEvent);
+    message.xclient = .{
+        .type = client_message,
+        .serial = 0,
+        .send_event = 1,
+        .display = self.display,
+        .window = to,
+        .message_type = kind,
+        .format = 32,
+        .data = .{ .l = data },
+    };
+    _ = self.x.XSendEvent(self.display, to, 0, 0, &message);
+    _ = self.x.XFlush(self.display);
+}
+
 fn readLongs(self: *Impl, window: Window, property: Atom, kind: Atom, into: []c_long) []c_long {
     var actual_type: Atom = 0;
     var actual_format: c_int = 0;
@@ -2589,13 +2761,15 @@ fn translate(self: *Impl, ev: *XEvent, queue: *backend.Queue) Error!void {
 
     switch (ev.type) {
         client_message => {
-            // The only one that matters: the window manager asking to close.
+            // The window manager asking to close, or a drag of files.
             if (ev.xclient.message_type == self.wm_protocols and
                 ev.xclient.data.l[0] == @as(c_long, @bitCast(self.wm_delete_window)))
             {
                 try queue.push(.{ .close = id });
-            }
+            } else dragMessage(self, native, &ev.xclient);
         },
+
+        selection_notify => try dropArrived(self, native, &ev.xselection, queue),
 
         expose => {
             // Only the last rectangle of a run; the earlier ones are the same
@@ -3737,6 +3911,146 @@ test "a client message sent to the window comes back out as an event" {
     const first = queue.next() orelse return error.NoEventArrived;
     try testing.expectEqual(id, first.window());
     try testing.expect(first == .close);
+}
+
+/// Another program, for the drop tests: a second connection to the server,
+/// with a window of its own to drag from.
+const OtherProgram = struct {
+    x: Xlib,
+    display: *Display,
+    window: Window,
+    dnd: Dnd,
+
+    fn open(x: Xlib) ?OtherProgram {
+        const display = x.XOpenDisplay(null) orelse return null;
+        const root = x.XRootWindow(display, x.XDefaultScreen(display));
+        const window = x.XCreateSimpleWindow(display, root, 0, 0, 10, 10, 0, 0, 0);
+        return .{ .x = x, .display = display, .window = window, .dnd = .init(x, display) };
+    }
+
+    fn close(self: *OtherProgram) void {
+        _ = self.x.XDestroyWindow(self.display, self.window);
+        _ = self.x.XCloseDisplay(self.display);
+    }
+
+    fn send(self: *OtherProgram, to: Window, kind: Atom, data: [5]c_long) void {
+        var message: XEvent = std.mem.zeroes(XEvent);
+        message.xclient = .{
+            .type = client_message,
+            .serial = 0,
+            .send_event = 1,
+            .display = self.display,
+            .window = to,
+            .message_type = kind,
+            .format = 32,
+            .data = .{ .l = data },
+        };
+        _ = self.x.XSendEvent(self.display, to, 0, 0, &message);
+        _ = self.x.XFlush(self.display);
+    }
+
+    /// The next event of `kind` for its window, pumping `impl` while it waits,
+    /// since what it waits for is this program answering.
+    fn waitFor(self: *OtherProgram, impl: backend.Impl, queue: *backend.Queue, kind: c_int) !XEvent {
+        var ev: XEvent = undefined;
+        for (0..100) |_| {
+            if (self.x.XCheckTypedWindowEvent(self.display, self.window, kind, &ev) != 0) return ev;
+            try vtable.pump(impl, queue);
+            try vtable.wait(impl, 20);
+        }
+        return error.NoEventArrived;
+    }
+};
+
+test "files dragged in from another program are a drop where they were let go, and it hears they were taken" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    const id: event.WindowId = @enumFromInt(7);
+    const target = try hiddenTestWindow(impl, id);
+    defer vtable.destroyWindow(impl, testing.allocator, target);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+
+    // The window says it takes drops, and which version of the protocol.
+    var said: [1]c_long = undefined;
+    try testing.expectEqualSlices(c_long, &.{Dnd.newest}, readLongs(self, target.window, self.dnd.aware, xa_atom, &said));
+
+    var other = OtherProgram.open(self.x) orelse return error.SkipZigTest;
+    defer other.close();
+    const source: c_long = @bitCast(other.window);
+    _ = self.x.XSetSelectionOwner(other.display, other.dnd.selection, other.window, current_time);
+
+    // Over the window, at (30, 40) of the root - and of the window, which is
+    // at the root's corner.
+    other.send(target.window, other.dnd.enter, .{ source, 5 << 24, @bitCast(other.dnd.uri_list), 0, 0 });
+    other.send(target.window, other.dnd.position, .{ source, 0, (30 << 16) | 40, 0, @bitCast(other.dnd.action_copy) });
+    const status = (try other.waitFor(impl, &queue, client_message)).xclient;
+    try testing.expectEqual(other.dnd.status, status.message_type);
+    try testing.expectEqual(@as(c_long, @bitCast(target.window)), status.data.l[0]);
+    try testing.expect(status.data.l[1] & 1 != 0);
+    try testing.expectEqual(@as(c_long, @bitCast(other.dnd.action_copy)), status.data.l[4]);
+
+    // Let go: the window asks for the files, and gets them.
+    other.send(target.window, other.dnd.drop, .{ source, 0, 0, 0, 0 });
+    const asked = (try other.waitFor(impl, &queue, selection_request)).xselectionrequest;
+    try testing.expectEqual(other.dnd.uri_list, asked.target);
+    const list = "# from a file manager\r\nfile:///tmp/hero%20sheet.png\r\nfile:///tmp/%C3%A1rv%C3%ADz.txt\r\n";
+    _ = self.x.XChangeProperty(other.display, asked.requestor, asked.property, asked.target, 8, prop_mode_replace, list, @intCast(list.len));
+    var reply: XEvent = std.mem.zeroes(XEvent);
+    reply.xselection = .{
+        .type = selection_notify,
+        .serial = 0,
+        .send_event = 1,
+        .display = other.display,
+        .requestor = asked.requestor,
+        .selection = asked.selection,
+        .target = asked.target,
+        .property = asked.property,
+        .time = asked.time,
+    };
+    _ = self.x.XSendEvent(other.display, asked.requestor, 0, 0, &reply);
+    _ = self.x.XFlush(other.display);
+
+    const dropped = (try nextOf(impl, &queue, .drop)).drop;
+    try testing.expectEqual(id, dropped.window);
+    try testing.expectEqual(@as(usize, 2), dropped.paths.len);
+    try testing.expectEqualStrings("/tmp/hero sheet.png", dropped.paths[0]);
+    try testing.expectEqualStrings("/tmp/árvíz.txt", dropped.paths[1]);
+    try testing.expectEqual(@as(f64, 30), dropped.x);
+    try testing.expectEqual(@as(f64, 40), dropped.y);
+
+    const finished = (try other.waitFor(impl, &queue, client_message)).xclient;
+    try testing.expectEqual(other.dnd.finished, finished.message_type);
+    try testing.expectEqual(@as(c_long, 1), finished.data.l[1] & 1);
+    try testing.expectEqual(@as(c_long, @bitCast(other.dnd.action_copy)), finished.data.l[2]);
+}
+
+test "a drag that offers no files is refused, and its drop is no event" {
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    const target = try hiddenTestWindow(impl, @enumFromInt(8));
+    defer vtable.destroyWindow(impl, testing.allocator, target);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+
+    var other = OtherProgram.open(self.x) orelse return error.SkipZigTest;
+    defer other.close();
+    const source: c_long = @bitCast(other.window);
+    const text: c_long = @bitCast(self.x.XInternAtom(other.display, "UTF8_STRING", 0));
+
+    other.send(target.window, other.dnd.enter, .{ source, 5 << 24, text, 0, 0 });
+    other.send(target.window, other.dnd.position, .{ source, 0, (5 << 16) | 5, 0, @bitCast(other.dnd.action_copy) });
+    const status = (try other.waitFor(impl, &queue, client_message)).xclient;
+    try testing.expectEqual(other.dnd.status, status.message_type);
+    try testing.expectEqual(@as(c_long, 0), status.data.l[1] & 1);
+
+    other.send(target.window, other.dnd.drop, .{ source, 0, 0, 0, 0 });
+    const finished = (try other.waitFor(impl, &queue, client_message)).xclient;
+    try testing.expectEqual(other.dnd.finished, finished.message_type);
+    try testing.expectEqual(@as(c_long, 0), finished.data.l[1] & 1);
+    while (queue.next()) |ev| try testing.expect(ev != .drop);
 }
 
 fn hiddenTestWindow(impl: backend.Impl, id: event.WindowId) !*Native {

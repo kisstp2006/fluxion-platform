@@ -38,8 +38,8 @@ all.
 | Backend | State |
 | --- | --- |
 | `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition, clipboard, file and folder dialogs, dropped files |
-| `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard, file and folder dialogs |
-| `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard, file and folder dialogs |
+| `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard, file and folder dialogs, dropped files |
+| `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard, file and folder dialogs, dropped files |
 | `android` | Activity lifecycle, surface create and loss, focus, keys, multi-touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard, file and folder dialogs (with `FluxionActivity`) |
 | `web` | Canvas, both loop models, keyboard, text and composition, mouse, multi-touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard, file and folder dialogs |
 | `none` | Compiles and runs everywhere, makes no windows |
@@ -488,8 +488,13 @@ if (platform.trash.available) try platform.trash.move(gpa, io, "C:/game/art/old.
 **A drop is one event for the whole armful**: every path, and the point it
 was let go at, in content-area coordinates like a `.cursor` event's - the
 folder or the thing under it is where it goes. The paths are the library's
-until the next `pump`, as a dialog's answer is. Windows (`WM_DROPFILES`) and
-the web have drops; X11 and Wayland do not yet.
+until the next `pump`, as a dialog's answer is. Windows has them through
+`WM_DROPFILES`, and the web from the page. On X11 a window speaks XDND
+(version 5) with the program the files come from, and on Wayland it takes the
+drag's offer through the seat's data device; on both it asks for the files as
+`text/uri-list` and copies, never moves - after a move the other program
+would throw the files away - and a path is a `file:` URI of this machine,
+its escapes undone.
 
 **The trash needs no window**, so a tool with none can use it, and a test.
 On Windows it asks the shell - `SHFileOperationW` with undo, the call

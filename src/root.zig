@@ -209,6 +209,7 @@ test {
     _ = culture;
     _ = @import("backend/unix_shell.zig");
     _ = @import("backend/kdeglobals.zig");
+    _ = @import("backend/uri_list.zig");
     _ = web;
     _ = @import("window_ops_test.zig");
     _ = @import("cursor_test.zig");

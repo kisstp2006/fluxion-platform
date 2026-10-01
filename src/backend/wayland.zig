@@ -58,6 +58,7 @@ const cursor_mod = @import("../cursor.zig");
 const icon_mod = @import("../icon.zig");
 const insets_mod = @import("../insets.zig");
 const clipboard = @import("clipboard.zig");
+const uri_list = @import("uri_list.zig");
 const linux_dialog = @import("linux_dialog.zig");
 
 const Error = platform.Error;
@@ -349,8 +350,15 @@ const data_device_set_selection: u32 = 1;
 const data_device_release: u32 = 2;
 const data_source_offer: u32 = 0;
 const data_source_destroy: u32 = 1;
+const data_offer_accept: u32 = 0;
 const data_offer_receive: u32 = 1;
 const data_offer_destroy: u32 = 2;
+/// From version 3, as the drag's actions are.
+const data_offer_finish: u32 = 3;
+const data_offer_set_actions: u32 = 4;
+/// `wl_data_device_manager.dnd_action.copy`: the only one taken, since after
+/// a move the program that offered the files would throw them away.
+const dnd_action_copy: u32 = 1;
 
 /// The names text goes by, best first: what a paste asks the owner for.
 const text_types = [_][:0]const u8{ "text/plain;charset=utf-8", "UTF8_STRING", "text/plain" };
@@ -757,6 +765,12 @@ const Impl = struct {
     new_offer: ?*Offer = null,
     selection_offer: ?*Offer = null,
     drag_offer: ?*Offer = null,
+    /// The window a drag is over, and where in it the pointer last was.
+    drag_window: ?*Native = null,
+    drag_x: f64 = 0,
+    drag_y: f64 = 0,
+    /// The files of a drop, as they came, until `pump` makes them an event.
+    dropped: ?Dropped = null,
     source: ?*Proxy = null,
     clipboard_text: std.ArrayListUnmanaged(u8) = .empty,
     /// The serial of the last key or click, which a request for the clipboard
@@ -775,10 +789,22 @@ const Impl = struct {
     export_handle_len: usize = 0,
 };
 
-/// One `wl_data_offer`, and the best of `text_types` it has said it can give.
+/// One `wl_data_offer`, the best of `text_types` it has said it can give, and
+/// whether it can give a list of files.
 const Offer = struct {
     proxy: *Proxy,
     text: ?usize = null,
+    files: bool = false,
+};
+
+/// A drop's `text/uri-list`, kept as it came. A drop dispatched outside `pump`
+/// would otherwise have its paths freed by the next one's start before they
+/// were handed over; `pump` turns it into an event after that.
+const Dropped = struct {
+    window: event.WindowId,
+    text: std.ArrayListUnmanaged(u8) = .empty,
+    x: f64,
+    y: f64,
 };
 
 /// One display, as its events arrive.
@@ -1557,6 +1583,7 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     if (self.new_offer) |offer| destroyOffer(self, offer);
     if (self.selection_offer) |offer| destroyOffer(self, offer);
     if (self.drag_offer) |offer| destroyOffer(self, offer);
+    if (self.dropped) |*dropped| dropped.text.deinit(gpa);
     if (self.source) |source| requestDestroy(self, source, data_source_destroy);
     if (self.data_device) |device| {
         if (w.wl_proxy_get_version(device) >= 2) requestDestroy(self, device, data_device_release) else w.wl_proxy_destroy(device);
@@ -3030,9 +3057,9 @@ const DataDeviceListener = extern struct {
 const data_device_listener: DataDeviceListener = .{
     .data_offer = onDataOffer,
     .enter = onDragEnter,
-    .leave = onDragEnd,
+    .leave = onDragLeave,
     .motion = onDragMotion,
-    .drop = onDragEnd,
+    .drop = onDrop,
     .selection = onSelection,
 };
 
@@ -3058,8 +3085,8 @@ fn onSelection(data: ?*anyopaque, device: *Proxy, proxy: ?*Proxy) callconv(.c) v
     self.selection_offer = offerOf(self, proxy);
 }
 
-/// A drag passing over a window. Nothing here accepts one yet, so its offer
-/// is only kept to be let go of when the drag leaves or drops.
+/// A drag passing over a window: one of this program's takes the files it
+/// offers, copied, and nothing else it offers.
 fn onDragEnter(
     data: ?*anyopaque,
     device: *Proxy,
@@ -3069,21 +3096,75 @@ fn onDragEnter(
     y: Fixed,
     proxy: ?*Proxy,
 ) callconv(.c) void {
-    _ = .{ device, serial, surface, x, y };
-    const self: *Impl = @ptrCast(@alignCast(data.?));
-    if (self.drag_offer) |old| destroyOffer(self, old);
-    self.drag_offer = offerOf(self, proxy);
-}
-
-fn onDragEnd(data: ?*anyopaque, device: *Proxy) callconv(.c) void {
     _ = device;
     const self: *Impl = @ptrCast(@alignCast(data.?));
     if (self.drag_offer) |old| destroyOffer(self, old);
-    self.drag_offer = null;
+    self.drag_offer = offerOf(self, proxy);
+    self.drag_window = if (surface) |over| self.windows.get(@intFromPtr(over)) else null;
+    self.drag_x = fixedToDouble(x);
+    self.drag_y = fixedToDouble(y);
+
+    const offer = self.drag_offer orelse return;
+    const taken: ?[*:0]const u8 = if (offer.files and self.drag_window != null) uri_list.mime else null;
+    var accept = [_]WlArgument{ .{ .u = serial }, .{ .s = taken } };
+    request(self, offer.proxy, data_offer_accept, &accept);
+    if (taken != null and self.w.wl_proxy_get_version(offer.proxy) >= 3) {
+        var actions = [_]WlArgument{ .{ .u = dnd_action_copy }, .{ .u = dnd_action_copy } };
+        request(self, offer.proxy, data_offer_set_actions, &actions);
+    }
 }
 
 fn onDragMotion(data: ?*anyopaque, device: *Proxy, time: u32, x: Fixed, y: Fixed) callconv(.c) void {
-    _ = .{ data, device, time, x, y };
+    _ = .{ device, time };
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    self.drag_x = fixedToDouble(x);
+    self.drag_y = fixedToDouble(y);
+}
+
+fn onDragLeave(data: ?*anyopaque, device: *Proxy) callconv(.c) void {
+    _ = device;
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    forgetDrag(self);
+}
+
+/// Let go over a window that took the drag: the files are read down a pipe,
+/// as the clipboard is, the drag is told they were taken, and `pump` makes
+/// them a `drop` event.
+fn onDrop(data: ?*anyopaque, device: *Proxy) callconv(.c) void {
+    _ = device;
+    const self: *Impl = @ptrCast(@alignCast(data.?));
+    defer forgetDrag(self);
+    const offer = self.drag_offer orelse return;
+    const window = self.drag_window orelse return;
+    if (!offer.files) return;
+
+    var dropped: Dropped = .{ .window = window.id, .x = self.drag_x, .y = self.drag_y };
+    receive(self, offer.proxy, uri_list.mime, &dropped.text, self.gpa) catch {
+        dropped.text.deinit(self.gpa);
+        return;
+    };
+    if (self.w.wl_proxy_get_version(offer.proxy) >= 3) request(self, offer.proxy, data_offer_finish, null);
+    if (self.dropped) |*older| older.text.deinit(self.gpa);
+    self.dropped = dropped;
+}
+
+fn forgetDrag(self: *Impl) void {
+    if (self.drag_offer) |old| destroyOffer(self, old);
+    self.drag_offer = null;
+    self.drag_window = null;
+}
+
+/// The files of the last drop as a `drop` event, after `pump` let go of the
+/// last pump's paths, so these last until the next one.
+fn handDrop(self: *Impl) void {
+    var dropped = self.dropped orelse return;
+    self.dropped = null;
+    defer dropped.text.deinit(self.gpa);
+    const paths = uri_list.paths(self.answers.allocator(), dropped.text.items) catch {
+        self.push_failed = true;
+        return;
+    };
+    if (paths.len > 0) push(self, .{ .drop = .{ .window = dropped.window, .paths = paths, .x = dropped.x, .y = dropped.y } });
 }
 
 const DataOfferListener = extern struct {
@@ -3102,6 +3183,7 @@ fn onOfferType(data: ?*anyopaque, proxy: *Proxy, mime: [*:0]const u8) callconv(.
     _ = proxy;
     const offer: *Offer = @ptrCast(@alignCast(data.?));
     const name = std.mem.span(mime);
+    if (std.mem.eql(u8, name, uri_list.mime)) offer.files = true;
     for (text_types, 0..) |candidate, rank| {
         if (!std.mem.eql(u8, name, candidate)) continue;
         if (offer.text == null or rank < offer.text.?) offer.text = rank;
@@ -3434,6 +3516,7 @@ fn pump(impl: backend.Impl, queue: *backend.Queue) Error!void {
             w.wl_display_cancel_read(self.display);
         }
     }
+    handDrop(self);
 
     if (self.push_failed) return error.OutOfMemory;
 }
@@ -3794,6 +3877,15 @@ test "the clipboard's opcodes name the messages they are used for" {
     try testing.expectEqualStrings("destroy", Name.of(core.wl_data_source_interface, data_source_destroy));
     try testing.expectEqualStrings("receive", Name.of(core.wl_data_offer_interface, data_offer_receive));
     try testing.expectEqualStrings("destroy", Name.of(core.wl_data_offer_interface, data_offer_destroy));
+    try testing.expectEqualStrings("accept", Name.of(core.wl_data_offer_interface, data_offer_accept));
+    try testing.expectEqualStrings("finish", Name.of(core.wl_data_offer_interface, data_offer_finish));
+    try testing.expectEqualStrings("set_actions", Name.of(core.wl_data_offer_interface, data_offer_set_actions));
+    try testing.expectEqualStrings("u?s", std.mem.span(core.wl_data_offer_interface.methods.?[data_offer_accept].signature));
+    try testing.expectEqualStrings("3uu", std.mem.span(core.wl_data_offer_interface.methods.?[data_offer_set_actions].signature));
+    // The drag's events, which the listener's fields stand in the order of.
+    for ([_][]const u8{ "data_offer", "enter", "leave", "motion", "drop", "selection" }, 0..) |name, at| {
+        try testing.expectEqualStrings(name, std.mem.span(core.wl_data_device_interface.events.?[at].name));
+    }
 
     try testing.expectEqualStrings("?ou", std.mem.span(core.wl_data_device_interface.methods.?[data_device_set_selection].signature));
     try testing.expectEqualStrings("sh", std.mem.span(core.wl_data_offer_interface.methods.?[data_offer_receive].signature));
@@ -3856,6 +3948,34 @@ test "a window completes the xdg-shell handshake with a real compositor" {
     }
 
     try testing.expect(castWindow(native).configured);
+}
+
+test "a drop's files are an event of the pump after it, wherever the drop was dispatched" {
+    // What `onDrop` keeps, as a drop outside any pump would leave it: the next
+    // pump hands it over after letting go of the last pump's paths.
+    const impl = open(testing.allocator) catch return error.SkipZigTest;
+    defer vtable.deinit(impl, testing.allocator);
+    const self = cast(impl);
+    var queue: backend.Queue = .init(testing.allocator);
+    defer queue.deinit();
+
+    var dropped: Dropped = .{ .window = @enumFromInt(3), .x = 12.5, .y = 7 };
+    try dropped.text.appendSlice(self.gpa, "file:///tmp/one.png\r\nfile:///tmp/two%20words.txt\r\n");
+    self.dropped = dropped;
+    try vtable.pump(impl, &queue);
+
+    var got: ?event.DropEvent = null;
+    while (queue.next()) |ev| {
+        if (ev == .drop) got = ev.drop;
+    }
+    const drop = got orelse return error.NoEventArrived;
+    try testing.expectEqual(@as(event.WindowId, @enumFromInt(3)), drop.window);
+    try testing.expectEqual(@as(usize, 2), drop.paths.len);
+    try testing.expectEqualStrings("/tmp/one.png", drop.paths[0]);
+    try testing.expectEqualStrings("/tmp/two words.txt", drop.paths[1]);
+    try testing.expectEqual(@as(f64, 12.5), drop.x);
+    try testing.expectEqual(@as(f64, 7), drop.y);
+    try testing.expect(self.dropped == null);
 }
 
 test "the wake pipe stops a wait that has nothing to wait for" {

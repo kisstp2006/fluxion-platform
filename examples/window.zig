@@ -121,6 +121,11 @@ pub fn main(init: std.process.Init) !void {
                 };
             },
 
+            .drop => |d| {
+                try out.print("drop   {d} at {d:.0},{d:.0}\n", .{ d.paths.len, d.x, d.y });
+                for (d.paths) |path| try out.print("       {s}\n", .{path});
+            },
+
             .file_dialog => |d| {
                 try out.print("dialog {d}: {d} chosen\n", .{ @intFromEnum(d.id), d.paths.len });
                 for (d.paths, 0..) |path, index| {
