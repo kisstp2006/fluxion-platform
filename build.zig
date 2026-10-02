@@ -70,57 +70,76 @@ pub fn build(b: *std.Build) void {
     // proves the stub the tests just used has the same signatures the page
     // will be handed. A mismatch is a compile error here rather than an
     // argument quietly coerced in somebody's tab.
+    // A browser build is freestanding, or WASI, whose calls the page's glue
+    // answers - which is how `std.Io` reads files there. Both are checked.
     const wasm_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag = .freestanding,
     });
-    const wasm_mod = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = wasm_target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "fluxion_dyn", .module = b.dependency("fluxion_dyn", .{
-                .target = wasm_target,
+    const wasi_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+    const wasm_mod = webModule(b, wasm_target, optimize);
+    const wasi_mod = webModule(b, wasi_target, optimize);
+    for ([_]struct { name: []const u8, module: *std.Build.Module, target: std.Build.ResolvedTarget, files: bool }{
+        .{ .name = "fluxion-platform-wasm-check", .module = wasm_mod, .target = wasm_target, .files = false },
+        .{ .name = "fluxion-platform-wasi-check", .module = wasi_mod, .target = wasi_target, .files = true },
+    }) |check| {
+        const wasm_check = b.addExecutable(.{
+            .name = check.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.addWriteFiles().add("wasm_check.zig", b.fmt(
+                    \\//! The library as a browser build sees it. Nothing calls this: that
+                    \\//! it compiles, imports and all, is the test.
+                    \\const std = @import("std");
+                    \\const platform = @import("fluxion_platform");
+                    \\
+                    \\pub const std_options: std.Options = .{{ .logFn = platform.web.logFn }};
+                    \\pub const panic = platform.web.panic;
+                    \\
+                    \\export fn check() void {{
+                    \\    var ctx = platform.Context.init(std.heap.wasm_allocator, .{{}}) catch return;
+                    \\    defer ctx.deinit();
+                    \\    const win = ctx.createWindow(.{{}}) catch return;
+                    \\    defer win.destroy();
+                    \\    ctx.pump() catch {{}};
+                    \\    if (platform.web.droppedFile(&ctx, 0, std.heap.wasm_allocator)) |bytes| {{
+                    \\        std.log.info("{{d}} dropped bytes", .{{bytes.len}});
+                    \\        std.heap.wasm_allocator.free(bytes);
+                    \\    }} else |_| {{}}
+                    \\    _ = ctx.openFileDialog(.{{ .window = win, .multiple = true }}) catch {{}};
+                    \\    if (ctx.chosenFile(0, std.heap.wasm_allocator)) |bytes| {{
+                    \\        std.heap.wasm_allocator.free(bytes);
+                    \\    }} else |_| {{}}
+                    \\}}
+                    \\{s}
+                , .{if (check.files)
+                    \\
+                    \\/// The page's folders and fonts, through `std.Io` under WASI.
+                    \\export fn files() void {
+                    \\    var threaded: std.Io.Threaded = .init_single_threaded;
+                    \\    const io = threaded.io();
+                    \\    const user = platform.folders.path(std.heap.wasm_allocator, io, .data) catch return;
+                    \\    std.heap.wasm_allocator.free(user);
+                    \\    const face = platform.fonts.systemUi(std.heap.wasm_allocator, io) catch return;
+                    \\    face.deinit(std.heap.wasm_allocator);
+                    \\    var tag: [platform.culture.max_tag]u8 = undefined;
+                    \\    var zone: [64]u8 = undefined;
+                    \\    std.log.info("{s} {s} {d}", .{ platform.culture.userLocale(&tag), platform.culture.timeZoneName(&zone), platform.culture.utcOffset(0) });
+                    \\}
+                    \\
+                else
+                    ""})),
+                .target = check.target,
                 .optimize = optimize,
-            }).module("fluxion_dyn") },
-        },
-    });
-    const wasm_check = b.addExecutable(.{
-        .name = "fluxion-platform-wasm-check",
-        .root_module = b.createModule(.{
-            .root_source_file = b.addWriteFiles().add("wasm_check.zig",
-                \\//! The library as a browser build sees it. Nothing calls this: that
-                \\//! it compiles, imports and all, is the test.
-                \\const std = @import("std");
-                \\const platform = @import("fluxion_platform");
-                \\
-                \\pub const std_options: std.Options = .{ .logFn = platform.web.logFn };
-                \\pub const panic = platform.web.panic;
-                \\
-                \\export fn check() void {
-                \\    var ctx = platform.Context.init(std.heap.wasm_allocator, .{}) catch return;
-                \\    defer ctx.deinit();
-                \\    const win = ctx.createWindow(.{}) catch return;
-                \\    defer win.destroy();
-                \\    ctx.pump() catch {};
-                \\    if (platform.web.droppedFile(&ctx, 0, std.heap.wasm_allocator)) |bytes| {
-                \\        std.log.info("{d} dropped bytes", .{bytes.len});
-                \\        std.heap.wasm_allocator.free(bytes);
-                \\    } else |_| {}
-                \\    _ = ctx.openFileDialog(.{ .window = win, .multiple = true }) catch {};
-                \\    if (ctx.chosenFile(0, std.heap.wasm_allocator)) |bytes| {
-                \\        std.heap.wasm_allocator.free(bytes);
-                \\    } else |_| {}
-                \\}
-            ),
-            .target = wasm_target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "fluxion_platform", .module = wasm_mod }},
-        }),
-    });
-    wasm_check.entry = .disabled;
-    wasm_check.rdynamic = true;
-    test_step.dependOn(&wasm_check.step);
+                .imports = &.{.{ .name = "fluxion_platform", .module = check.module }},
+            }),
+        });
+        wasm_check.entry = .disabled;
+        wasm_check.rdynamic = true;
+        test_step.dependOn(&wasm_check.step);
+    }
 
     // zig build docs -> zig-out/docs
     const docs_lib = b.addLibrary(.{
@@ -173,9 +192,11 @@ pub fn build(b: *std.Build) void {
 
     addWebExamples(b, .{
         .platform = wasm_mod,
+        .wasi_platform = wasi_mod,
         .webgl = webgl_dep,
         .glue = web_glue,
         .target = wasm_target,
+        .wasi_target = wasi_target,
         .optimize = optimize,
         .test_step = test_step,
     });
@@ -303,15 +324,32 @@ fn addAndroidDex(b: *std.Build, source: std.Build.LazyPath) void {
 }
 
 const WebExamples = struct {
-    /// The library, built for the browser.
+    /// The library, built for the browser: freestanding, and under WASI.
     platform: *std.Build.Module,
+    wasi_platform: *std.Build.Module,
     webgl: *std.Build.Dependency,
     /// `src/backend/web.js`.
     glue: std.Build.LazyPath,
     target: std.Build.ResolvedTarget,
+    wasi_target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     test_step: *std.Build.Step,
 };
+
+/// The library, built for a browser target.
+fn webModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fluxion_dyn", .module = b.dependency("fluxion_dyn", .{
+                .target = target,
+                .optimize = optimize,
+            }).module("fluxion_dyn") },
+        },
+    });
+}
 
 /// The browser examples: two modules, the two glues they are instantiated
 /// with, and a page to open them in - all in `zig-out/web`, which is the
@@ -341,11 +379,15 @@ fn addWebExamples(b: *std.Build, web: WebExamples) void {
         /// Exports `init`, `frame` and `deinit` for the page to call, rather
         /// than having a `main` of its own.
         exports_frame: bool,
+        /// Built for WASI, whose files the page keeps.
+        wasi: bool = false,
     }{
         // The shape that runs in every browser.
         .{ .name = "web", .exports_frame = true },
         // A desktop loop, unchanged, for a browser that can suspend a module.
         .{ .name = "web_loop", .exports_frame = false },
+        // Files through `std.Io`, the player's kept between visits.
+        .{ .name = "web_files", .exports_frame = true, .wasi = true },
     };
 
     for (examples) |example| {
@@ -353,9 +395,12 @@ fn addWebExamples(b: *std.Build, web: WebExamples) void {
             .name = example.name,
             .root_module = b.createModule(.{
                 .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example.name})),
-                .target = web.target,
+                .target = if (example.wasi) web.wasi_target else web.target,
                 .optimize = web.optimize,
-                .imports = &.{
+                // The files example draws nothing.
+                .imports = if (example.wasi) &.{
+                    .{ .name = "fluxion_platform", .module = web.wasi_platform },
+                } else &.{
                     .{ .name = "fluxion_platform", .module = web.platform },
                     .{ .name = "fluxion_webgl", .module = web.webgl.module("fluxion_webgl") },
                 },

@@ -369,6 +369,625 @@ class Win {
 // The glue
 // -------------------------------------------------------------------------
 
+// -------------------------------------------------------------------------
+// Files: what a WASI module is given for an operating system
+// -------------------------------------------------------------------------
+//
+// A module built for `wasm32-wasi` reads and writes files, asks the time and
+// for random bytes through WASI's calls - which is how Zig's `std.Io` does it
+// there, so a program's file code is the same in a page as on a disc. These
+// are those calls, against a file system in memory:
+//
+//   /           opened for the module, as its working folder
+//   /user       the player's own, kept in IndexedDB between visits - when the
+//               page names a `storage` to keep it under
+//   /picked     the files dropped on the page or chosen in its file dialog
+//   /tmp        scratch, gone with the page
+//
+// and anything the page puts there before the module runs: a game's pack, a
+// font. A file put there stays in JavaScript's memory and is copied into the
+// module's a read at a time, so a large one costs the module nothing until it
+// is read. What the page does not have - sockets, links - answers ENOSYS.
+// Nothing here waits: a page's frame is the browser's to give, so a sleep
+// returns at once.
+
+const ERRNO = { success: 0, badf: 8, exist: 20, inval: 28, isdir: 31, noent: 44, nosys: 52, notdir: 54, notempty: 55, notsup: 58, spipe: 70 };
+const FILETYPE = { char: 2, directory: 3, file: 4 };
+const OFLAGS = { creat: 1, directory: 2, excl: 4, trunc: 8 };
+const FDFLAG_APPEND = 1;
+
+/// Thrown by `proc_exit`, which ends the module where it stands.
+export class Exit extends Error {
+  constructor(code) {
+    super(`the program exited with ${code}`);
+    this.code = code;
+  }
+}
+
+let nextNode = 1;
+
+class FileNode {
+  constructor(directory) {
+    this.ino = nextNode++;
+    this.type = directory ? FILETYPE.directory : FILETYPE.file;
+    this.mtime = BigInt(Date.now()) * 1000000n;
+    if (directory) this.children = new Map();
+    else {
+      this.data = new Uint8Array(0);
+      this.size = 0;
+    }
+  }
+
+  bytes() {
+    return this.data.subarray(0, this.size);
+  }
+
+  reserve(length) {
+    if (length <= this.data.length) return;
+    const grown = new Uint8Array(Math.max(length, this.data.length * 2, 64));
+    grown.set(this.bytes());
+    this.data = grown;
+  }
+}
+
+export class Files {
+  /// `args` is the program's command line and `env` its environment.
+  /// `storage` names the IndexedDB database `/user` is kept in - a game's own
+  /// name, so two games on one site keep theirs apart - or nothing keeps it.
+  /// `log(level, line)` hears standard output and error a line at a time.
+  constructor({ args = [], env = {}, storage = null, log = defaultLog } = {}) {
+    this.args = args;
+    this.env = Object.entries(env).map(([key, value]) => `${key}=${value}`);
+    this.storage = storage;
+    this.log = log;
+    this.root = new FileNode(true);
+    for (const folder of ["/user", "/picked", "/tmp"]) this.make(folder, true);
+    this.fds = new Map([[3, { node: this.root, path: "/", pos: 0n, preopen: "/" }]]);
+    this.nextFd = 4;
+    this.lines = { 1: "", 2: "" };
+    this.dirty = new Set();
+    this.flushing = null;
+    this.soon = null;
+    this.memory = null;
+    this.encoder = new TextEncoder();
+    this.decoder = new TextDecoder();
+  }
+
+  /// Put a file in place: a pack before the module runs, a dropped file.
+  put(path, bytes) {
+    const node = this.make(path, false);
+    node.data = bytes;
+    node.size = bytes.length;
+    node.mtime = BigInt(Date.now()) * 1000000n;
+    this.touched(Files.normalize(path));
+  }
+
+  /// The bytes of a file, or null.
+  get(path) {
+    const node = this.find(path);
+    return node && node.type === FILETYPE.file ? node.bytes() : null;
+  }
+
+  /// `/user` as it was left, from IndexedDB.
+  async load() {
+    if (!this.storage || typeof indexedDB === "undefined") return;
+    const db = await this.database();
+    const kept = await new Promise((resolve, reject) => {
+      const request = db.transaction("files").objectStore("files").getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    for (const entry of kept) {
+      if (!Files.kept(entry.path)) continue;
+      if (entry.directory) {
+        this.make(entry.path, true);
+        continue;
+      }
+      const node = this.make(entry.path, false);
+      node.data = new Uint8Array(entry.data);
+      node.size = node.data.length;
+      node.mtime = BigInt(entry.mtime);
+    }
+    this.dirty.clear();
+    if (this.soon) clearTimeout(this.soon);
+    this.soon = null;
+  }
+
+  /// What changed in `/user` since, written to IndexedDB. One write at a
+  /// time; a change made during one is written by the next.
+  flush() {
+    if (!this.storage || this.dirty.size === 0 || typeof indexedDB === "undefined") return this.flushing ?? Promise.resolve();
+    if (this.flushing) return this.flushing.then(() => this.flush());
+    const paths = [...this.dirty];
+    this.dirty.clear();
+    this.flushing = this.database()
+      .then((db) => new Promise((resolve, reject) => {
+        const transaction = db.transaction("files", "readwrite");
+        const store = transaction.objectStore("files");
+        for (const path of paths) {
+          const node = this.find(path);
+          if (!node) store.delete(path);
+          else if (node.type === FILETYPE.directory) store.put({ path, directory: true });
+          else store.put({ path, data: node.bytes().slice(), mtime: node.mtime.toString() });
+        }
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+      }))
+      .catch((error) => this.log(2, `the player's files were not kept: ${error}`))
+      .finally(() => {
+        this.flushing = null;
+      });
+    return this.flushing;
+  }
+
+  database() {
+    this.db ??= new Promise((resolve, reject) => {
+      const request = indexedDB.open(this.storage, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files", { keyPath: "path" });
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    return this.db;
+  }
+
+  static kept(path) {
+    return path === "/user" || path.startsWith("/user/");
+  }
+
+  /// A change in `/user`, written a moment later - by a timer rather than
+  /// the next frame, which a hidden tab never gets.
+  touched(path) {
+    if (!Files.kept(path)) return;
+    this.dirty.add(path);
+    if (this.storage && !this.soon && typeof setTimeout === "function") {
+      this.soon = setTimeout(() => {
+        this.soon = null;
+        this.flush();
+      }, 50);
+    }
+  }
+
+  // -- paths --
+
+  static normalize(path) {
+    const parts = [];
+    for (const part of path.split("/")) {
+      if (part === "" || part === ".") continue;
+      if (part === "..") parts.pop();
+      else parts.push(part);
+    }
+    return "/" + parts.join("/");
+  }
+
+  find(path) {
+    let node = this.root;
+    for (const part of Files.normalize(path).split("/")) {
+      if (part === "") continue;
+      if (node.type !== FILETYPE.directory) return null;
+      node = node.children.get(part);
+      if (!node) return null;
+    }
+    return node;
+  }
+
+  /// The node at `path`, made with the folders above it where missing.
+  make(path, directory) {
+    const parts = Files.normalize(path).split("/").filter(Boolean);
+    let node = this.root;
+    parts.forEach((part, index) => {
+      let next = node.children.get(part);
+      if (!next) {
+        next = new FileNode(directory || index < parts.length - 1);
+        node.children.set(part, next);
+      }
+      node = next;
+    });
+    return node;
+  }
+
+  split(path) {
+    const full = Files.normalize(path);
+    const at = full.lastIndexOf("/");
+    return { parent: this.find(full.slice(0, at) || "/"), name: full.slice(at + 1) };
+  }
+
+  // -- the module's memory --
+
+  get u8() {
+    if (!this.cachedU8 || this.cachedU8.buffer !== this.memory.buffer) this.cachedU8 = new Uint8Array(this.memory.buffer);
+    return this.cachedU8;
+  }
+
+  get view() {
+    if (!this.cachedView || this.cachedView.buffer !== this.memory.buffer) this.cachedView = new DataView(this.memory.buffer);
+    return this.cachedView;
+  }
+
+  /// The path a call names, under the folder `fd` is open on - or null.
+  pathAt(fd, ptr, len) {
+    const folder = this.fds.get(fd);
+    if (!folder || folder.node.type !== FILETYPE.directory) return null;
+    const named = this.decoder.decode(this.u8.subarray(ptr, ptr + len));
+    return Files.normalize(named.startsWith("/") ? named : `${folder.path}/${named}`);
+  }
+
+  iovs(ptr, count) {
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const base = this.view.getUint32(ptr + i * 8, true);
+      out.push(this.u8.subarray(base, base + this.view.getUint32(ptr + i * 8 + 4, true)));
+    }
+    return out;
+  }
+
+  writeStat(ptr, node) {
+    const view = this.view;
+    view.setBigUint64(ptr, 0n, true);
+    view.setBigUint64(ptr + 8, BigInt(node.ino), true);
+    view.setUint8(ptr + 16, node.type);
+    view.setBigUint64(ptr + 24, 1n, true);
+    view.setBigUint64(ptr + 32, BigInt(node.type === FILETYPE.file ? node.size : 0), true);
+    view.setBigUint64(ptr + 40, node.mtime, true);
+    view.setBigUint64(ptr + 48, node.mtime, true);
+    view.setBigUint64(ptr + 56, node.mtime, true);
+  }
+
+  writeAt(entry, bytes, offset) {
+    const node = entry.node;
+    const at = Number(offset);
+    const end = at + bytes.length;
+    node.reserve(end);
+    if (at > node.size) node.data.fill(0, node.size, at);
+    node.data.set(bytes, at);
+    node.size = Math.max(node.size, end);
+    node.mtime = BigInt(Date.now()) * 1000000n;
+    this.touched(entry.path);
+  }
+
+  readAt(entry, iovs, count, offset) {
+    const node = entry.node;
+    let at = Number(offset);
+    let read = 0;
+    for (const part of this.iovs(iovs, count)) {
+      const take = Math.max(0, Math.min(part.length, node.size - at));
+      part.set(node.data.subarray(at, at + take));
+      at += take;
+      read += take;
+      if (take < part.length) break;
+    }
+    return read;
+  }
+
+  /// A line written to standard output or error, said at the level its
+  /// prefix names.
+  say(fd, bytes) {
+    this.lines[fd] += this.decoder.decode(bytes);
+    let end;
+    while ((end = this.lines[fd].indexOf("\n")) >= 0) {
+      const line = this.lines[fd].slice(0, end);
+      this.lines[fd] = this.lines[fd].slice(end + 1);
+      const level = /^error/.test(line) ? 3 : /^warn/.test(line) ? 2 : /^debug/.test(line) ? 0 : 1;
+      this.log(level, line);
+    }
+  }
+
+  listSizes(list, count, size) {
+    this.view.setUint32(count, list.length, true);
+    this.view.setUint32(size, list.reduce((sum, item) => sum + this.encoder.encode(item).length + 1, 0), true);
+    return ERRNO.success;
+  }
+
+  listWrite(list, pointers, buffer) {
+    let at = buffer;
+    list.forEach((item, index) => {
+      const bytes = this.encoder.encode(item);
+      this.view.setUint32(pointers + index * 4, at, true);
+      this.u8.set(bytes, at);
+      this.u8[at + bytes.length] = 0;
+      at += bytes.length + 1;
+    });
+    return ERRNO.success;
+  }
+
+  renamedUnder(from, to, node) {
+    if (node.type !== FILETYPE.directory) return;
+    for (const [name, child] of node.children) {
+      this.touched(`${from}/${name}`);
+      this.touched(`${to}/${name}`);
+      this.renamedUnder(`${from}/${name}`, `${to}/${name}`, child);
+    }
+  }
+
+  // -- the calls --
+
+  /// The WASI calls `module` imports, each answered here or with ENOSYS.
+  imports(module) {
+    const self = this;
+    const fileOf = (fd) => {
+      const entry = self.fds.get(fd);
+      return entry && entry.node.type === FILETYPE.file ? entry : null;
+    };
+    const calls = {
+      args_sizes_get: (count, size) => self.listSizes(self.args, count, size),
+      args_get: (argv, buffer) => self.listWrite(self.args, argv, buffer),
+      environ_sizes_get: (count, size) => self.listSizes(self.env, count, size),
+      environ_get: (environ, buffer) => self.listWrite(self.env, environ, buffer),
+      clock_res_get: (_id, out) => {
+        self.view.setBigUint64(out, 1000n, true);
+        return ERRNO.success;
+      },
+      clock_time_get: (id, _precision, out) => {
+        const ns = id === 0 ? BigInt(Date.now()) * 1000000n : BigInt(Math.round(performance.now() * 1e6));
+        self.view.setBigUint64(out, ns, true);
+        return ERRNO.success;
+      },
+      random_get: (ptr, len) => {
+        for (let at = 0; at < len; at += 65536) crypto.getRandomValues(self.u8.subarray(ptr + at, ptr + Math.min(len, at + 65536)));
+        return ERRNO.success;
+      },
+      poll_oneoff: (input, output, count, events) => {
+        const view = self.view;
+        for (let i = 0; i < count; i++) {
+          view.setBigUint64(output + i * 32, view.getBigUint64(input + i * 48, true), true);
+          view.setUint16(output + i * 32 + 8, 0, true);
+          view.setUint8(output + i * 32 + 10, view.getUint8(input + i * 48 + 8));
+        }
+        view.setUint32(events, count, true);
+        return ERRNO.success;
+      },
+      proc_exit: (code) => {
+        throw new Exit(code);
+      },
+      sched_yield: () => ERRNO.success,
+      fd_prestat_get: (fd, out) => {
+        const entry = self.fds.get(fd);
+        if (!entry?.preopen) return ERRNO.badf;
+        self.view.setUint8(out, 0);
+        self.view.setUint32(out + 4, self.encoder.encode(entry.preopen).length, true);
+        return ERRNO.success;
+      },
+      fd_prestat_dir_name: (fd, ptr, len) => {
+        const entry = self.fds.get(fd);
+        if (!entry?.preopen) return ERRNO.badf;
+        self.u8.set(self.encoder.encode(entry.preopen).subarray(0, len), ptr);
+        return ERRNO.success;
+      },
+      fd_write: (fd, iovs, count, written) => {
+        let total = 0;
+        for (const part of self.iovs(iovs, count)) {
+          if (fd === 1 || fd === 2) self.say(fd, part);
+          else {
+            const entry = fileOf(fd);
+            if (!entry) return ERRNO.badf;
+            const at = entry.append ? BigInt(entry.node.size) : entry.pos;
+            self.writeAt(entry, part, at);
+            entry.pos = at + BigInt(part.length);
+          }
+          total += part.length;
+        }
+        self.view.setUint32(written, total, true);
+        return ERRNO.success;
+      },
+      fd_pwrite: (fd, iovs, count, offset, written) => {
+        const entry = fileOf(fd);
+        if (!entry) return ERRNO.badf;
+        let total = 0;
+        let at = offset;
+        for (const part of self.iovs(iovs, count)) {
+          self.writeAt(entry, part, at);
+          at += BigInt(part.length);
+          total += part.length;
+        }
+        self.view.setUint32(written, total, true);
+        return ERRNO.success;
+      },
+      fd_read: (fd, iovs, count, read) => {
+        if (fd === 0) {
+          self.view.setUint32(read, 0, true);
+          return ERRNO.success;
+        }
+        const entry = self.fds.get(fd);
+        if (!entry) return ERRNO.badf;
+        if (entry.node.type !== FILETYPE.file) return ERRNO.isdir;
+        const got = self.readAt(entry, iovs, count, entry.pos);
+        entry.pos += BigInt(got);
+        self.view.setUint32(read, got, true);
+        return ERRNO.success;
+      },
+      fd_pread: (fd, iovs, count, offset, read) => {
+        const entry = self.fds.get(fd);
+        if (!entry) return ERRNO.badf;
+        if (entry.node.type !== FILETYPE.file) return ERRNO.isdir;
+        self.view.setUint32(read, self.readAt(entry, iovs, count, offset), true);
+        return ERRNO.success;
+      },
+      fd_seek: (fd, offset, whence, out) => {
+        if (fd < 3) return ERRNO.spipe;
+        const entry = self.fds.get(fd);
+        if (!entry) return ERRNO.badf;
+        const base = whence === 0 ? 0n : whence === 1 ? entry.pos : BigInt(entry.node.size ?? 0);
+        if (base + offset < 0n) return ERRNO.inval;
+        entry.pos = base + offset;
+        self.view.setBigUint64(out, entry.pos, true);
+        return ERRNO.success;
+      },
+      fd_tell: (fd, out) => {
+        const entry = self.fds.get(fd);
+        if (!entry) return ERRNO.badf;
+        self.view.setBigUint64(out, entry.pos, true);
+        return ERRNO.success;
+      },
+      fd_close: (fd) => {
+        const entry = self.fds.get(fd);
+        if (!entry) return ERRNO.badf;
+        if (!entry.preopen) self.fds.delete(fd);
+        return ERRNO.success;
+      },
+      fd_sync: () => ERRNO.success,
+      fd_datasync: () => ERRNO.success,
+      fd_advise: () => ERRNO.success,
+      fd_allocate: () => ERRNO.success,
+      fd_fdstat_get: (fd, out) => {
+        const entry = self.fds.get(fd);
+        const type = fd < 3 ? FILETYPE.char : entry?.node.type;
+        if (type === undefined) return ERRNO.badf;
+        self.view.setUint8(out, type);
+        self.view.setUint16(out + 2, entry?.append ? FDFLAG_APPEND : 0, true);
+        self.view.setBigUint64(out + 8, 0xffffffffffffffffn, true);
+        self.view.setBigUint64(out + 16, 0xffffffffffffffffn, true);
+        return ERRNO.success;
+      },
+      fd_fdstat_set_flags: (fd, flags) => {
+        const entry = self.fds.get(fd);
+        if (!entry) return ERRNO.badf;
+        entry.append = (flags & FDFLAG_APPEND) !== 0;
+        return ERRNO.success;
+      },
+      fd_filestat_get: (fd, out) => {
+        if (fd < 3) {
+          self.writeStat(out, { ino: 0, type: FILETYPE.char, mtime: 0n });
+          return ERRNO.success;
+        }
+        const entry = self.fds.get(fd);
+        if (!entry) return ERRNO.badf;
+        self.writeStat(out, entry.node);
+        return ERRNO.success;
+      },
+      fd_filestat_set_size: (fd, size) => {
+        const entry = fileOf(fd);
+        if (!entry) return ERRNO.badf;
+        const node = entry.node;
+        const length = Number(size);
+        node.reserve(length);
+        if (length > node.size) node.data.fill(0, node.size, length);
+        node.size = length;
+        self.touched(entry.path);
+        return ERRNO.success;
+      },
+      fd_filestat_set_times: () => ERRNO.success,
+      fd_readdir: (fd, buffer, len, cookie, used) => {
+        const entry = self.fds.get(fd);
+        if (!entry) return ERRNO.badf;
+        if (entry.node.type !== FILETYPE.directory) return ERRNO.notdir;
+        const names = [...entry.node.children.keys()];
+        let at = 0;
+        for (let i = Number(cookie); i < names.length && at < len; i++) {
+          const name = self.encoder.encode(names[i]);
+          const record = new Uint8Array(24 + name.length);
+          const view = new DataView(record.buffer);
+          view.setBigUint64(0, BigInt(i + 1), true);
+          view.setBigUint64(8, BigInt(entry.node.children.get(names[i]).ino), true);
+          view.setUint32(16, name.length, true);
+          view.setUint8(20, entry.node.children.get(names[i]).type);
+          record.set(name, 24);
+          const room = Math.min(record.length, len - at);
+          self.u8.set(record.subarray(0, room), buffer + at);
+          at += room;
+        }
+        self.view.setUint32(used, at, true);
+        return ERRNO.success;
+      },
+      path_open: (fd, _dirflags, ptr, len, oflags, _base, _inheriting, fdflags, out) => {
+        const path = self.pathAt(fd, ptr, len);
+        if (path === null) return ERRNO.badf;
+        let node = self.find(path);
+        if (node && oflags & OFLAGS.creat && oflags & OFLAGS.excl) return ERRNO.exist;
+        if (!node) {
+          if (!(oflags & OFLAGS.creat)) return ERRNO.noent;
+          const { parent, name } = self.split(path);
+          if (!parent) return ERRNO.noent;
+          if (parent.type !== FILETYPE.directory) return ERRNO.notdir;
+          node = new FileNode(false);
+          parent.children.set(name, node);
+          self.touched(path);
+        }
+        if (oflags & OFLAGS.directory && node.type !== FILETYPE.directory) return ERRNO.notdir;
+        if (oflags & OFLAGS.trunc && node.type === FILETYPE.file) {
+          node.size = 0;
+          self.touched(path);
+        }
+        const handle = self.nextFd++;
+        self.fds.set(handle, { node, path, pos: 0n, append: (fdflags & FDFLAG_APPEND) !== 0 });
+        self.view.setUint32(out, handle, true);
+        return ERRNO.success;
+      },
+      path_filestat_get: (fd, _flags, ptr, len, out) => {
+        const path = self.pathAt(fd, ptr, len);
+        if (path === null) return ERRNO.badf;
+        const node = self.find(path);
+        if (!node) return ERRNO.noent;
+        self.writeStat(out, node);
+        return ERRNO.success;
+      },
+      path_filestat_set_times: () => ERRNO.success,
+      path_create_directory: (fd, ptr, len) => {
+        const path = self.pathAt(fd, ptr, len);
+        if (path === null) return ERRNO.badf;
+        if (self.find(path)) return ERRNO.exist;
+        const { parent, name } = self.split(path);
+        if (!parent) return ERRNO.noent;
+        if (parent.type !== FILETYPE.directory) return ERRNO.notdir;
+        parent.children.set(name, new FileNode(true));
+        self.touched(path);
+        return ERRNO.success;
+      },
+      path_unlink_file: (fd, ptr, len) => {
+        const path = self.pathAt(fd, ptr, len);
+        if (path === null) return ERRNO.badf;
+        const { parent, name } = self.split(path);
+        const node = parent?.children?.get(name);
+        if (!node) return ERRNO.noent;
+        if (node.type === FILETYPE.directory) return ERRNO.isdir;
+        parent.children.delete(name);
+        self.touched(path);
+        return ERRNO.success;
+      },
+      path_remove_directory: (fd, ptr, len) => {
+        const path = self.pathAt(fd, ptr, len);
+        if (path === null) return ERRNO.badf;
+        const { parent, name } = self.split(path);
+        const node = parent?.children?.get(name);
+        if (!node) return ERRNO.noent;
+        if (node.type !== FILETYPE.directory) return ERRNO.notdir;
+        if (node.children.size > 0) return ERRNO.notempty;
+        parent.children.delete(name);
+        self.touched(path);
+        return ERRNO.success;
+      },
+      path_rename: (fd, ptr, len, toFd, toPtr, toLen) => {
+        const from = self.pathAt(fd, ptr, len);
+        const to = self.pathAt(toFd, toPtr, toLen);
+        if (from === null || to === null) return ERRNO.badf;
+        const source = self.split(from);
+        const target = self.split(to);
+        const node = source.parent?.children?.get(source.name);
+        if (!node) return ERRNO.noent;
+        if (!target.parent || target.parent.type !== FILETYPE.directory) return ERRNO.noent;
+        source.parent.children.delete(source.name);
+        target.parent.children.set(target.name, node);
+        self.touched(from);
+        self.touched(to);
+        self.renamedUnder(from, to, node);
+        return ERRNO.success;
+      },
+      path_readlink: () => ERRNO.inval,
+      path_symlink: () => ERRNO.notsup,
+      path_link: () => ERRNO.notsup,
+    };
+    const out = {};
+    for (const imported of WebAssembly.Module.imports(module)) {
+      if (imported.module === "wasi_snapshot_preview1" && imported.kind === "function") {
+        out[imported.name] = calls[imported.name] ?? (() => ERRNO.nosys);
+      }
+    }
+    return { wasi_snapshot_preview1: out };
+  }
+}
+
+// -------------------------------------------------------------------------
+// The platform
+// -------------------------------------------------------------------------
+
 export class Platform {
   /// Whether this browser can suspend a module, which a program whose `main`
   /// is a loop needs.
@@ -383,6 +1002,9 @@ export class Platform {
   /// `maxDropBytes` is the largest dropped file read into memory for
   /// `web.droppedFile`, and `maxChosenBytes` the most read of one file
   /// dialog's answer, every file together, for `Context.chosenFile`.
+  /// `args`, `env` and `storage` are a WASI module's command line,
+  /// environment, and the IndexedDB database its `/user` is kept in: see
+  /// `Files`, which is `files` here.
   constructor(options = {}) {
     this.options = options;
     this.pool = canvasesFrom(options.canvas).map((canvas) => ({ canvas, taken: false }));
@@ -390,6 +1012,9 @@ export class Platform {
     this.logSink = options.log ?? defaultLog;
     this.maxDropBytes = options.maxDropBytes ?? 256 * 1024 * 1024;
     this.maxChosenBytes = options.maxChosenBytes ?? 256 * 1024 * 1024;
+    this.files = new Files({ args: options.args, env: options.env, storage: options.storage, log: (level, line) => this.logSink(level, line) });
+    /// Whether the module is a WASI one, whose files are `files`.
+    this.wasi = false;
 
     this.windows = new Map();
     this.nextHandle = 1;
@@ -471,6 +1096,13 @@ export class Platform {
 
   text(ptr, len) {
     return this.decoder.decode(this.u8.subarray(ptr >>> 0, (ptr >>> 0) + (len >>> 0)));
+  }
+
+  /// `text` into `ptr[0..len]`, as much as fits on a whole character.
+  /// Answers how many bytes were written.
+  writeText(text, ptr, len) {
+    const { written } = this.encoder.encodeInto(text, this.u8.subarray(ptr >>> 0, (ptr >>> 0) + (len >>> 0)));
+    return written;
   }
 
   // -- the import object --
@@ -779,6 +1411,11 @@ export class Platform {
           } catch {}
           return 1;
         },
+
+        localeTag: (ptr, len) => self.writeText(globalThis.navigator?.language ?? "", ptr, len),
+        // `getTimezoneOffset` is minutes west, for that moment.
+        utcOffset: (unixMs) => -new Date(unixMs).getTimezoneOffset() * 60,
+        timeZone: (ptr, len) => self.writeText(Intl.DateTimeFormat().resolvedOptions().timeZone ?? "", ptr, len),
       },
     };
   }
@@ -813,9 +1450,16 @@ export class Platform {
 
     const imports = {};
     for (const glue of [...others, this]) {
-      for (const [name, functions] of Object.entries(glue.imports())) {
+      for (const [name, functions] of Object.entries(glue.imports(module))) {
         imports[name] = { ...imports[name], ...functions };
       }
+    }
+    // A WASI module's operating system is `files`, with `/user` as it was
+    // left, read before the module can ask for any of it.
+    this.wasi = WebAssembly.Module.imports(module).some((entry) => entry.module === "wasi_snapshot_preview1");
+    if (this.wasi) {
+      await this.files.load();
+      Object.assign(imports, this.files.imports(module));
     }
     const instance = await WebAssembly.instantiate(module, imports);
 
@@ -835,6 +1479,19 @@ export class Platform {
     this.memory = instance.exports.memory;
     if (!(this.memory instanceof WebAssembly.Memory)) {
       throw new Error("the module does not export its memory, and the glue reads events into it");
+    }
+    this.files.memory = this.memory;
+    // A WASI reactor with a C library sets it up here, before anything else
+    // is called.
+    if (typeof instance.exports._initialize === "function") instance.exports._initialize();
+    if (this.wasi && typeof addEventListener === "function") {
+      // What changed in `/user` is kept as the page goes, as well as a moment
+      // after it changed.
+      const keep = () => this.files.flush();
+      addEventListener("pagehide", keep);
+      addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") keep();
+      });
     }
   }
 
@@ -886,6 +1543,7 @@ export class Platform {
     });
 
     if (typeof deinit === "function") deinit();
+    await this.files.flush();
   }
 
   /// One animation frame of a frame-model program.
@@ -1699,7 +2357,7 @@ export class Platform {
     // Where it was let go, the way a pointer's place is said.
     const [x, y] = this.local(win, event);
     this.queue({ kind: KIND.dropBegin, win: win.id, a: files.length, x, y });
-    files.forEach((file, index) => this.queue({ kind: KIND.dropFile, win: win.id, a: index, text: file.name }));
+    files.forEach((file, index) => this.queue({ kind: KIND.dropFile, win: win.id, a: index, text: this.picked(file.name, bytes[index]) }));
   }
 
   // -- the file dialog --
@@ -1767,7 +2425,17 @@ export class Platform {
     dialog.input.remove();
     this.chosen = files;
     this.queue({ kind: KIND.dialogBegin, win: dialog.win, a: files.length, b: dialog.id });
-    files.forEach((file, index) => this.queue({ kind: KIND.dialogFile, win: dialog.win, a: index, text: file.name }));
+    files.forEach((file, index) => this.queue({ kind: KIND.dialogFile, win: dialog.win, a: index, text: this.picked(file.name, file.bytes) }));
+  }
+
+  /// What a dropped or chosen file is called to the program: for a WASI one,
+  /// its path under `/picked`, where its bytes are put for its file code to
+  /// read; for any other, its name.
+  picked(name, bytes) {
+    if (!this.wasi) return name;
+    const path = Files.normalize(`/picked/${name}`);
+    if (bytes) this.files.put(path, bytes);
+    return path;
   }
 
   // -- the pointer --

@@ -123,6 +123,10 @@ pub const Page = struct {
     url_bytes: [256]u8 = undefined,
     url_len: usize = 0,
     popups: bool = true,
+    /// The person's language, time zone and its offset, as `Intl` says them.
+    locale: []const u8 = "en-US",
+    zone: []const u8 = "UTC",
+    offset: i32 = 0,
 };
 
 /// A file dialog, as `openFileDialog` was asked for it.
@@ -525,6 +529,23 @@ pub fn openUrl(ptr: [*]const u8, len: u32) u32 {
     page.url_len = @min(len, page.url_bytes.len);
     @memcpy(page.url_bytes[0..page.url_len], ptr[0..page.url_len]);
     return 1;
+}
+
+pub fn localeTag(ptr: [*]u8, len: u32) u32 {
+    const kept = @min(len, page.locale.len);
+    @memcpy(ptr[0..kept], page.locale[0..kept]);
+    return @intCast(kept);
+}
+
+pub fn utcOffset(unix_ms: f64) i32 {
+    _ = unix_ms;
+    return page.offset;
+}
+
+pub fn timeZone(ptr: [*]u8, len: u32) u32 {
+    const kept = @min(len, page.zone.len);
+    @memcpy(ptr[0..kept], page.zone[0..kept]);
+    return @intCast(kept);
 }
 
 // -------------------------------------------------------------------------

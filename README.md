@@ -51,9 +51,11 @@ The library still builds for macOS and WASI: `backend` is `.none` there and
 every call says so, rather than the build failing. That is what keeps a program
 that only wanted `Key` compiling on a target this library has never heard of.
 
-`wasm32-freestanding` is the browser, and gets `web`. WASI does not, and that
-is deliberate: a WASI runtime is a command line with no page behind it, and a
-module that imported a canvas from one would not even instantiate.
+`wasm32` is the browser, and gets `web`: freestanding, or WASI, whose calls the
+page's glue answers too - which is how Zig's `std.Io` reads and writes files
+there (see [Files, under WASI](#files-under-wasi)). A WASI runtime with no
+page behind it, a command line, cannot instantiate a module that makes a
+window, which imports a canvas; one that only reads files never asks for it.
 
 **Text input is the gap on both.** X11 goes through `XLookupString`, which
 answers in Latin-1: ASCII and the western European letters and nothing else.
@@ -588,7 +590,8 @@ Windows' rule for now where there is neither.
 | Windows | `icu.dll`, Windows 10 1903 and later | `GetTimeZoneInformation`: the offset now | `GetUserDefaultLocaleName` |
 | Linux | `libicuuc.so.N` and `libicui18n.so.N`, names ending `_N` | `localtime_r` | `LC_ALL`, `LC_TIME`, `LANG` |
 | Android | `libicu.so`, API 31 and later | `localtime_r` | `en-US` |
-| web, macOS | not yet: English | UTC | `en-US` |
+| web | not yet: English | the browser's, for that moment (`getTimezoneOffset`) | the browser's language (`navigator.language`) |
+| macOS | not yet: English | UTC | `en-US` |
 
 ## Drawing: a context, or a surface, and nothing after that
 
@@ -786,8 +789,8 @@ defer pack.file.close(io);
 
 ## A browser owns the loop
 
-Built for `wasm32-freestanding`, a window is a `<canvas>` and the events come
-from the page, through `fluxion-platform.js` — the JavaScript half of the
+Built for `wasm32` - freestanding or WASI - a window is a `<canvas>` and the
+events come from the page, through `fluxion-platform.js` — the JavaScript half of the
 backend, one file with no dependencies. Everything above holds: the same
 queue, the same `Key` at the same positions, the same `.char` for what was
 typed. What does not hold is `while`.
@@ -874,6 +877,35 @@ pointers, and [Fluxion WebGL](https://github.com/kisstp2006/fluxion-webgl) is
 the binding that declares them. Both glues can own one canvas — whichever asks
 for a context first makes it, and the other gets the same one.
 
+### Files, under WASI
+
+A module built for `wasm32-wasi` reads and writes files, asks the time and for
+random bytes through WASI's calls, and the glue answers them - so a program's
+file code is `std.Io`'s, the same in a page as on a disc, with nothing to
+change. `platform.files` is a file system in memory:
+
+| | |
+| --- | --- |
+| `/` | opened for the module: its working folder |
+| `/user` | the player's own, kept in the browser's IndexedDB between visits, under the `storage` the page names |
+| `/picked` | the files dropped on the page or chosen in its file dialog, which the module is told the paths of |
+| `/tmp` | scratch, gone with the page |
+
+```js
+const platform = new Platform({ canvas, args: ["game", "--pack", "/game.fxpack"], storage: "My Game" });
+platform.files.put("/game.fxpack", new Uint8Array(await (await fetch("game.fxpack")).arrayBuffer()));
+await platform.run("./game.wasm");
+```
+
+A change under `/user` is written to IndexedDB a moment after it is made - by
+a timer, as a hidden tab gets no animation frames - and again as the page is
+hidden or left. What the page puts there with `put` stays in JavaScript's
+memory and is copied into the module's a read at a time, so a large pack costs
+the module nothing until it is read. Nothing waits: a sleep returns at once,
+because the frame is the browser's to give. Sockets and links answer
+`ENOSYS`. `folders.path` is `/user` - the cache `/tmp` - and `fonts.systemUi`
+the `/fonts/ui.ttf` a page puts there, `/fonts/mono.ttf` for code.
+
 **A lost context is the Android pair of events.** A GPU reset, or a phone
 taking the memory back, arrives as `.surface_lost`; the context coming back
 arrives as `.surface_created`. A program already written for a phone rebuilds
@@ -922,8 +954,8 @@ dynamically.
 
 The web backend is the one that loads nothing, because there is nothing to
 open: its calls are WebAssembly imports, resolved by the page before the
-module runs. It is imported only for `wasm32-freestanding` - the one target
-where a page is what is on the other side.
+module runs. It is imported only for `wasm32`, freestanding or WASI - the
+target where a page is what is on the other side.
 
 `platform.supported` is what this build could open; `ctx.backend()` is what this
 run actually got.
@@ -1046,7 +1078,8 @@ The web backend runs its tests on every host, against a page that is not
 there: `web_stub.zig` answers every import the browser would, and a test
 queues what a listener would have heard and reads back the event the backend
 made of it. What keeps the stub honest is the suite's other half - it also
-*compiles* the library and both browser examples for `wasm32-freestanding`,
+*compiles* the library for `wasm32-freestanding` and `wasm32-wasi`, and the
+three browser examples,
 where `web.verify` compares every import against the stub's signature, so the
 two cannot drift apart without the build saying so.
 

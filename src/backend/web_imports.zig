@@ -198,3 +198,15 @@ pub extern "fluxion_platform" fn chosenRead(index: u32, ptr: [*]u8, len: u32) u3
 
 /// `window.open` in a new tab. Zero when the browser blocked it.
 pub extern "fluxion_platform" fn openUrl(ptr: [*]const u8, len: u32) u32;
+
+/// The language the person reads, as the browser says it - `hu-HU` - into
+/// `ptr[0..len]`. Answers how many bytes it is, zero when it does not say.
+pub extern "fluxion_platform" fn localeTag(ptr: [*]u8, len: u32) u32;
+
+/// Seconds east of UTC in the person's time zone at `unix_ms`, summer time
+/// included.
+pub extern "fluxion_platform" fn utcOffset(unix_ms: f64) i32;
+
+/// The person's time zone, an IANA name - `Europe/Budapest` - into
+/// `ptr[0..len]`. Answers how many bytes it is.
+pub extern "fluxion_platform" fn timeZone(ptr: [*]u8, len: u32) u32;

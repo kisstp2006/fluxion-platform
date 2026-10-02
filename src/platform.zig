@@ -61,12 +61,14 @@ pub const Backend = enum {
 };
 
 /// Whether this build runs in a browser: a 32-bit wasm module with nothing
-/// underneath it but the page that instantiated it.
+/// underneath it but the page that instantiated it - freestanding, or WASI,
+/// whose calls the page's glue answers (see `Files` in `web.js`), which is
+/// how Zig's `std.Io` reads and writes files there.
 ///
 /// 32-bit only. A `wasm64` module passes every pointer to JavaScript as a
 /// `BigInt`, and the glue is written for the numbers every browser's wasm
 /// actually uses.
-pub const is_web = builtin.cpu.arch == .wasm32 and builtin.os.tag == .freestanding;
+pub const is_web = builtin.cpu.arch == .wasm32 and (builtin.os.tag == .freestanding or builtin.os.tag == .wasi);
 
 /// Every backend this build could open, in the order they are tried.
 ///
@@ -81,7 +83,7 @@ pub const supported: []const Backend = switch (builtin.os.tag) {
         // compatibility layer in the middle.
         &.{ .wayland, .x11 },
     .freebsd, .netbsd, .openbsd, .dragonfly, .illumos => &.{ .wayland, .x11 },
-    .freestanding => if (is_web) &.{.web} else &.{},
+    .freestanding, .wasi => if (is_web) &.{.web} else &.{},
     else => &.{},
 };
 

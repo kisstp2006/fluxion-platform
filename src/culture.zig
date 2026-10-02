@@ -42,6 +42,8 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const dyn = @import("fluxion_dyn");
+const platform = @import("platform.zig");
+const web = @import("backend/web.zig");
 
 /// The longest tag `userLocale` gives.
 pub const max_tag = 64;
@@ -79,8 +81,13 @@ pub const available = switch (builtin.os.tag) {
 };
 
 /// The locale the person chose, as a BCP 47 tag: `hu-HU`, `en-US`, `pt-BR`.
-/// `en-US` when the system does not say.
+/// `en-US` when the system does not say. In a browser, the language it
+/// says the person reads.
 pub fn userLocale(buf: *[max_tag]u8) []const u8 {
+    if (comptime platform.is_web) {
+        const len = web.js.localeTag(buf, max_tag);
+        return if (len == 0) copy(buf, fallback_tag) else buf[0..len];
+    }
     if (icu()) |lib| {
         if (lib.uloc_getDefault()) |id| {
             var base: [max_tag]u8 = undefined;
@@ -98,6 +105,7 @@ pub fn userLocale(buf: *[max_tag]u8) []const u8 {
 /// Seconds east of UTC in the system's time zone at `unix_ms` - summer time
 /// included, for that moment rather than for now.
 pub fn utcOffset(unix_ms: i64) i32 {
+    if (comptime platform.is_web) return web.js.utcOffset(@floatFromInt(unix_ms));
     if (icu()) |lib| if (zoneCalendar(lib)) |cal| {
         var status: Status = 0;
         lib.ucal_setMillis(cal, @floatFromInt(unix_ms), &status);
@@ -111,6 +119,7 @@ pub fn utcOffset(unix_ms: i64) i32 {
 /// The system's time zone: an IANA name, `Europe/Budapest`, where the system
 /// has one, and empty where it does not say.
 pub fn timeZoneName(buf: []u8) []const u8 {
+    if (comptime platform.is_web) return buf[0..web.js.timeZone(buf.ptr, @intCast(buf.len))];
     const lib = icu() orelse return "";
     var wide: [128]UChar = undefined;
     var status: Status = 0;

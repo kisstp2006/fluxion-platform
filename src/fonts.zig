@@ -13,6 +13,10 @@
 //! Asked of the system rather than guessed from a list of paths: Segoe UI is
 //! not the interface font on a Chinese Windows, and DejaVu is not installed on
 //! every Linux.
+//!
+//! A page has no font a program can open, so in a browser, under WASI, the
+//! system's fonts are the ones the page puts in its files: `/fonts/ui.ttf`,
+//! and `/fonts/mono.ttf` for code, or the first where there is no second.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,6 +24,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const dyn = @import("fluxion_dyn");
+const platform = @import("platform.zig");
 
 pub const Face = struct {
     /// Absolute, for the caller to free.
@@ -34,6 +39,7 @@ pub const Face = struct {
 
 pub const available = switch (builtin.os.tag) {
     .windows, .macos, .linux, .freebsd, .openbsd, .netbsd, .dragonfly => true,
+    .wasi => platform.is_web,
     else => false,
 };
 
@@ -46,6 +52,7 @@ pub const Error = error{
 
 pub fn systemUi(gpa: Allocator, io: std.Io) Error!Face {
     if (comptime !available) return error.Unsupported;
+    if (comptime platform.is_web) return firstThere(gpa, io, &web_files);
     if (comptime builtin.os.tag == .windows) return windows.systemUi(gpa);
     if (comptime builtin.abi.isAndroid()) return firstThere(gpa, io, &android_files);
     if (comptime builtin.os.tag == .macos) return firstThere(gpa, io, &apple_files);
@@ -61,6 +68,7 @@ pub fn systemUi(gpa: Allocator, io: std.Io) Error!Face {
 /// `monospace` on Linux; and Android's own `monospace`, Droid Sans Mono.
 pub fn systemMono(gpa: Allocator, io: std.Io) Error!Face {
     if (comptime !available) return error.Unsupported;
+    if (comptime platform.is_web) return firstThere(gpa, io, &web_mono_files);
     if (comptime builtin.os.tag == .windows) return windows.systemMono(gpa);
     if (comptime builtin.abi.isAndroid()) return firstThere(gpa, io, &android_mono_files);
     if (comptime builtin.os.tag == .macos) return firstThere(gpa, io, &apple_mono_files);
@@ -71,6 +79,9 @@ pub fn systemMono(gpa: Allocator, io: std.Io) Error!Face {
 }
 
 const Known = struct { path: []const u8, index: u32 = 0 };
+
+const web_files = [_]Known{.{ .path = "/fonts/ui.ttf" }};
+const web_mono_files = [_]Known{ .{ .path = "/fonts/mono.ttf" }, .{ .path = "/fonts/ui.ttf" } };
 
 const android_files = [_]Known{
     .{ .path = "/system/fonts/Roboto-Regular.ttf" },

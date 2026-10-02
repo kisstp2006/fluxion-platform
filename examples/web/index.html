@@ -101,6 +101,7 @@
       <nav>
         <a id="frame" href="?example=frame">exports frame</a>
         <a id="loop" href="?example=loop">main loop</a>
+        <a id="files" href="?example=files">files</a>
       </nav>
     </header>
 
@@ -113,8 +114,9 @@
       import { Platform } from "./fluxion-platform.js";
       import { Fluxion } from "./fluxion-webgl.js";
 
-      const example = new URLSearchParams(location.search).get("example") === "loop" ? "loop" : "frame";
-      const module = example === "loop" ? "web_loop.wasm" : "web.wasm";
+      const asked = new URLSearchParams(location.search).get("example");
+      const example = asked === "loop" || asked === "files" ? asked : "frame";
+      const module = { frame: "web.wasm", loop: "web_loop.wasm", files: "web_files.wasm" }[example];
       document.getElementById(example).setAttribute("aria-current", "page");
 
       const canvas = document.getElementById("canvas");
@@ -143,7 +145,9 @@
       // context now, because its imports need one before the module exists;
       // the platform finds it when the program makes its window, and reports
       // what it really is.
-      const platform = new Platform({ canvas, log });
+      // The files example is a WASI build: its `/user` is kept, under this
+      // name, in the browser's IndexedDB.
+      const platform = new Platform({ canvas, log, storage: example === "files" ? "fluxion-platform-files" : null });
       const webgl = new Fluxion(canvas, { attributes: { stencil: true } });
 
       say(`${module}  ${webgl.isWebGL2 ? "WebGL 2" : "WebGL 1"}  ` +

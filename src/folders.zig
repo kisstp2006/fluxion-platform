@@ -11,6 +11,10 @@
 //! The system's own answer rather than an environment variable and a guess:
 //! documents redirected to OneDrive, and a Linux desktop's in the user's own
 //! language, are where a program finds them. A missing folder is not made.
+//!
+//! In a browser, under WASI, every one of them is the player's folder the
+//! page keeps between visits - `/user` - but the cache, which is `/tmp` and
+//! goes with the page: see `Files` in `web.js`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,6 +24,7 @@ const Allocator = std.mem.Allocator;
 const dyn = @import("fluxion_dyn");
 
 const android = @import("backend/android.zig");
+const platform = @import("platform.zig");
 
 pub const Folder = enum {
     home,
@@ -33,8 +38,13 @@ pub const Folder = enum {
 
 pub const available = switch (builtin.os.tag) {
     .windows, .macos, .linux, .freebsd, .openbsd, .netbsd, .dragonfly => true,
+    .wasi => platform.is_web,
     else => false,
 };
+
+/// The folders a page has, under WASI.
+pub const web_user = "/user";
+pub const web_cache = "/tmp";
 
 pub const Error = error{
     /// See `available`.
@@ -46,6 +56,7 @@ pub const Error = error{
 /// The folder, absolute, for the caller to free.
 pub fn path(gpa: Allocator, io: std.Io, which: Folder) Error![]u8 {
     if (comptime !available) return error.Unsupported;
+    if (comptime platform.is_web) return gpa.dupe(u8, if (which == .cache) web_cache else web_user);
     if (comptime builtin.os.tag == .windows) return windows.known(gpa, which);
     if (comptime builtin.abi.isAndroid()) return phone(gpa, which);
     const home = std.mem.span(libc.getenv("HOME") orelse return error.NotFound);
