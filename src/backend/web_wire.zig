@@ -80,8 +80,52 @@ pub const Kind = enum(u32) {
     /// id, `x` and `y` where it is in the drawing buffer's pixels, and `dx`
     /// how hard it presses.
     touch = 19,
+    /// What the bar above a phone's keyboard holds now: its whole text, and
+    /// `a` and `b` its caret or selection as byte offsets. A text past what
+    /// one drain holds comes in pieces: `c` is 1 on each but the last.
+    text_edited = 20,
+    /// The bar was put away: by its OK or Enter (`a` 1), or by a tap past it
+    /// or Escape (`a` 0).
+    text_done = 21,
     _,
 };
+
+/// What `setTextInputField` hands the page beside the field's text, its
+/// placeholder and its face: what kind of field it is, and how the bar above
+/// a phone's keyboard looks for it. The glue reads it with a `DataView` at
+/// the offsets the test below pins. Colours are 0xAARRGGBB; sizes the
+/// drawing buffer's pixels.
+pub const TextField = extern struct {
+    /// Byte offsets into the text.
+    selection_start: u32 = 0,
+    selection_end: u32 = 0,
+    /// `field_password`, `field_multiline` and `field_look`.
+    flags: u32 = 0,
+    /// Characters, or 0 for no limit.
+    max_length: u32 = 0,
+    bar: u32 = 0,
+    field_background: u32 = 0,
+    field_border: u32 = 0,
+    field_text: u32 = 0,
+    hint_color: u32 = 0,
+    button_background: u32 = 0,
+    button_border: u32 = 0,
+    button_text: u32 = 0,
+    field_border_width: f32 = 0,
+    field_radius: f32 = 0,
+    field_padding_x: f32 = 0,
+    field_padding_y: f32 = 0,
+    button_border_width: f32 = 0,
+    button_radius: f32 = 0,
+    button_padding_x: f32 = 0,
+    button_padding_y: f32 = 0,
+    font_size: f32 = 0,
+};
+
+pub const field_password: u32 = 1 << 0;
+pub const field_multiline: u32 = 1 << 1;
+/// The look's numbers are the program's; without it, the bar's own.
+pub const field_look: u32 = 1 << 2;
 
 /// One thing that happened, as `drain` writes it.
 ///
@@ -235,6 +279,18 @@ test "the event kinds are the numbers the glue sends" {
     try testing.expectEqual(17, @intFromEnum(Kind.dialog_file));
     try testing.expectEqual(18, @intFromEnum(Kind.safe_area));
     try testing.expectEqual(19, @intFromEnum(Kind.touch));
+    try testing.expectEqual(20, @intFromEnum(Kind.text_edited));
+    try testing.expectEqual(21, @intFromEnum(Kind.text_done));
+}
+
+test "a text field's kind and look are laid out the way the glue reads them" {
+    try testing.expectEqual(0, @offsetOf(TextField, "selection_start"));
+    try testing.expectEqual(8, @offsetOf(TextField, "flags"));
+    try testing.expectEqual(16, @offsetOf(TextField, "bar"));
+    try testing.expectEqual(44, @offsetOf(TextField, "button_text"));
+    try testing.expectEqual(48, @offsetOf(TextField, "field_border_width"));
+    try testing.expectEqual(80, @offsetOf(TextField, "font_size"));
+    try testing.expectEqual(84, @sizeOf(TextField));
 }
 
 test "the window info is laid out the way the glue fills it" {

@@ -130,6 +130,13 @@ const Impl = struct {
     /// What the input method is composing, as the last `.preedit` said.
     preedit: text_mod.Preedit = .{},
 
+    /// What the bar above a phone's keyboard holds, as the last whole
+    /// `.text_edited` said, until the next pump; and the pieces of one still
+    /// coming in.
+    edited: text_mod.Edited = .{},
+    edited_text: std.ArrayListUnmanaged(u8) = .empty,
+    edited_pieces: std.ArrayListUnmanaged(u8) = .empty,
+
     /// Where one drain lands. Held here rather than on the stack: four
     /// kilobytes of records and four of text is more than a wasm stack should
     /// be asked for in the middle of somebody's frame.
@@ -218,6 +225,8 @@ pub const vtable: backend.Vtable = .{
     .setTextInput = setTextInput,
     .setTextInputArea = setTextInputArea,
     .preedit = preedit,
+    .setTextInputField = setTextInputField,
+    .editedText = editedText,
     .setClipboardText = setClipboardText,
     .clipboardText = clipboardText,
     .hasClipboardText = hasClipboardText,
@@ -263,6 +272,8 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     js.close();
     self.natives.deinit(gpa);
     self.names.deinit();
+    self.edited_text.deinit(gpa);
+    self.edited_pieces.deinit(gpa);
     gpa.destroy(self);
 }
 
@@ -866,6 +877,53 @@ fn preedit(impl: backend.Impl) ?*const text_mod.Preedit {
     return &cast(impl).preedit;
 }
 
+/// The field for the bar the page shows above a phone's keyboard - when a
+/// finger raised it - in its look. Nothing changes on a page typed into
+/// with a keyboard: the hidden field goes on standing in.
+fn setTextInputField(impl: backend.Impl, native: backend.NativeWindow, field: text_mod.Field) Error!void {
+    _ = impl;
+    const most = std.math.maxInt(u32);
+    var told: wire.TextField = .{
+        .selection_start = std.math.cast(u32, field.selection_start) orelse most,
+        .selection_end = std.math.cast(u32, field.selection_end) orelse most,
+        .max_length = std.math.cast(u32, field.max_length) orelse most,
+    };
+    if (field.password) told.flags |= wire.field_password;
+    if (field.multiline) told.flags |= wire.field_multiline;
+    var font: []const u8 = "";
+    if (field.look) |look| {
+        told.flags |= wire.field_look;
+        told.bar = look.bar;
+        told.hint_color = look.hint_color;
+        told.font_size = look.font_size;
+        told.field_background = look.field.background;
+        told.field_border = look.field.border;
+        told.field_text = look.field.text;
+        told.field_border_width = look.field.border_width;
+        told.field_radius = look.field.corner_radius;
+        told.field_padding_x = look.field.padding_x;
+        told.field_padding_y = look.field.padding_y;
+        told.button_background = look.button.background;
+        told.button_border = look.button.border;
+        told.button_text = look.button.text;
+        told.button_border_width = look.button.border_width;
+        told.button_radius = look.button.corner_radius;
+        told.button_padding_x = look.button.padding_x;
+        told.button_padding_y = look.button.padding_y;
+        font = look.font;
+    }
+    const length = struct {
+        fn of(bytes: []const u8) u32 {
+            return std.math.cast(u32, bytes.len) orelse 0;
+        }
+    }.of;
+    js.setTextInputField(castWindow(native).handle, &told, field.text.ptr, length(field.text), field.hint.ptr, length(field.hint), font.ptr, length(font));
+}
+
+fn editedText(impl: backend.Impl) ?*const text_mod.Edited {
+    return &cast(impl).edited;
+}
+
 // -------------------------------------------------------------------------
 // The clipboard
 //
@@ -1106,6 +1164,25 @@ fn translate(self: *Impl, record: *const wire.Record) void {
             if (text.len == 0) self.preedit.clear() else self.preedit.set(text, record.a, record.b);
             push(self, .{ .preedit = id });
         },
+
+        // Gathered piece by piece, and then whole in its own buffer: the
+        // heap a drain fills is filled again by the next.
+        .text_edited => {
+            self.edited_pieces.appendSlice(self.gpa, text) catch {
+                self.push_failed = true;
+                return;
+            };
+            if (record.c != 0) return;
+            std.mem.swap(std.ArrayListUnmanaged(u8), &self.edited_text, &self.edited_pieces);
+            self.edited_pieces.clearRetainingCapacity();
+            self.edited = .{
+                .text = self.edited_text.items,
+                .selection_start = @intCast(@max(0, record.a)),
+                .selection_end = @intCast(@max(0, record.b)),
+            };
+            push(self, .{ .text_edited = id });
+        },
+        .text_done => push(self, .{ .text_done = .{ .window = id, .submitted = record.a != 0 } }),
 
         .drop_begin => {
             self.drop = .begin(id, .none, record.a);
@@ -2042,6 +2119,45 @@ test "text input is a field the page focuses, and turning it off ends a composit
             try vtable.pump(impl, queue);
             try vtable.setTextInput(impl, native, false);
             try testing.expect(vtable.preedit(impl).?.isEmpty());
+        }
+    }.run);
+}
+
+test "a phone's bar is told the field and its look, and says each change whole, in pieces when long, and its end" {
+    try withWindow(plainWindow(), struct {
+        fn run(impl: backend.Impl, native: backend.NativeWindow, queue: *backend.Queue) !void {
+            try vtable.setTextInput(impl, native, true);
+            try vtable.setTextInputField.?(impl, native, .{
+                .text = "Zoé",
+                .selection_start = 4,
+                .selection_end = 4,
+                .password = true,
+                .max_length = 12,
+                .hint = "Name",
+                .look = .{ .bar = 0xFF101010, .font = "face", .field = .{ .corner_radius = 6 } },
+            });
+            const canvas = stub.canvasFor(1).?;
+            try testing.expectEqualStrings("Zoé", canvas.fieldText());
+            try testing.expectEqualStrings("Name", canvas.fieldHint());
+            try testing.expectEqual(@as(u32, 4), canvas.field.selection_end);
+            try testing.expectEqual(@as(u32, 12), canvas.field.max_length);
+            try testing.expectEqual(wire.field_password | wire.field_look, canvas.field.flags);
+            try testing.expectEqual(@as(u32, 0xFF101010), canvas.field.bar);
+            try testing.expectEqual(@as(f32, 6), canvas.field.field_radius);
+            try testing.expectEqual(@as(usize, 4), canvas.field_font_len);
+
+            // A change in two pieces is one, whole; then the bar's OK.
+            stub.queue(.{ .kind = .text_edited, .window = 1, .a = 5, .b = 5, .c = 1 }, "Zo");
+            stub.queue(.{ .kind = .text_edited, .window = 1, .a = 5, .b = 5 }, "é!");
+            stub.queue(.{ .kind = .text_done, .window = 1, .a = 1 }, "");
+            try vtable.pump(impl, queue);
+            try testing.expectEqual(@as(event.WindowId, @enumFromInt(1)), queue.next().?.text_edited);
+            const done = queue.next().?.text_done;
+            try testing.expect(done.submitted);
+            try testing.expectEqual(@as(?event.Event, null), queue.next());
+            const edited = vtable.editedText.?(impl).?;
+            try testing.expectEqualStrings("Zoé!", edited.text);
+            try testing.expectEqual(@as(usize, 5), edited.selection_end);
         }
     }.run);
 }

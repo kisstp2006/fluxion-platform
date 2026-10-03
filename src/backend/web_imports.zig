@@ -125,6 +125,20 @@ pub extern "fluxion_platform" fn setTextInput(handle: u32, on: u32) u32;
 /// Move the hidden text field to the caret, so an input method opens there.
 pub extern "fluxion_platform" fn setTextInputArea(handle: u32, x: i32, y: i32, width: u32, height: u32) void;
 
+/// What the text field with the keyboard holds, for the bar the page shows
+/// above a phone's keyboard: its kind and look in `field`, its text, its
+/// placeholder and its face's file.
+pub extern "fluxion_platform" fn setTextInputField(
+    handle: u32,
+    field: *const wire.TextField,
+    text: [*]const u8,
+    text_len: u32,
+    hint: [*]const u8,
+    hint_len: u32,
+    font: [*]const u8,
+    font_len: u32,
+) void;
+
 /// The screen the page is on. Zero where there is no `screen` to ask.
 pub extern "fluxion_platform" fn monitor(info: *wire.MonitorInfo) u32;
 

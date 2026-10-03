@@ -41,7 +41,7 @@ all.
 | `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard, file and folder dialogs, dropped files |
 | `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard, file and folder dialogs, dropped files |
 | `android` | Activity lifecycle, surface create and loss, focus, keys, multi-touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard, file and folder dialogs (with `FluxionActivity`) |
-| `web` | Canvas, both loop models, keyboard, text and composition, mouse, multi-touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard, file and folder dialogs |
+| `web` | Canvas, both loop models, keyboard, text and composition, a phone's text bar, mouse, multi-touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard, file and folder dialogs |
 | `none` | Compiles and runs everywhere, makes no windows |
 | `other` | A windowing system the caller supplies to `Context.initWith`. Never selected by this library, since it does not know how to open it |
 
@@ -344,8 +344,12 @@ and how it looks, down to its face - has the bar show that, in that look, and
 hears each change whole: `.text_edited`, with the text and caret in
 `ctx.editedText()`. Pressing OK or the keyboard's Done, Back, or a tap past
 the bar is `.text_done`, which says whether it was submitted. A program that
-says nothing gets the bar's typing as `.char`, Backspace and Enter. On a
-desktop the field is the program's own, and `setTextInputField` does nothing.
+says nothing gets the bar's typing as `.char`, Backspace and Enter. In a
+browser on a phone - one pressed last with a finger, or whose pointer is a
+finger - the page shows the same bar for a program that says its field, at the
+bottom of what the reader sees, which a keyboard has moved; Enter, the bar's OK
+and Escape finish it. On a desktop the field is the program's own, and
+`setTextInputField` does nothing.
 
 **AltGr is its own modifier, `mods.alt_graph`.** Windows - and every browser
 on it - reports the right alt of a European layout as control and alt held

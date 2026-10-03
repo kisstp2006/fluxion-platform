@@ -65,7 +65,19 @@ const KIND = {
   dialogFile: 17,
   safeArea: 18,
   touch: 19,
+  textEdited: 20,
+  textDone: 21,
 };
+
+/// `TextField`: what kind of field the bar above a phone's keyboard shows,
+/// and how it looks - 32-bit integers from offset 0, floats from 48.
+const FIELD_PASSWORD = 1 << 0;
+const FIELD_MULTILINE = 1 << 1;
+const FIELD_LOOK = 1 << 2;
+
+/// The most bytes of the bar's text one record carries: half the heap a
+/// drain fills, so each piece fits one whole.
+const BAR_PIECE = 2048;
 
 /// `Record`: kind, window, a, b, c, d as 32-bit integers from offset 0, then
 /// x, y, dx, dy as doubles from 24, then where its text is at 56 and 60.
@@ -261,6 +273,45 @@ function utf8Length(text) {
   return bytes;
 }
 
+/// Where `bytes` of UTF-8 into `text` falls, in its UTF-16 units: a caret's
+/// place as the program says it and as a field takes it.
+function unitsAt(text, bytes) {
+  let seen = 0;
+  let units = 0;
+  for (const ch of text) {
+    if (seen >= bytes) break;
+    seen += utf8Length(ch);
+    units += ch.length;
+  }
+  return units;
+}
+
+/// `text` cut into pieces of at most `limit` bytes of UTF-8, never inside a
+/// character; one empty piece for an empty text.
+function piecesOf(text, limit) {
+  const pieces = [];
+  let piece = "";
+  let bytes = 0;
+  for (const ch of text) {
+    const size = utf8Length(ch);
+    if (bytes + size > limit && piece.length > 0) {
+      pieces.push(piece);
+      piece = "";
+      bytes = 0;
+    }
+    piece += ch;
+    bytes += size;
+  }
+  pieces.push(piece);
+  return pieces;
+}
+
+/// 0xAARRGGBB as CSS.
+function cssColor(argb) {
+  const alpha = ((argb >>> 24) & 0xff) / 255;
+  return `rgba(${(argb >>> 16) & 0xff}, ${(argb >>> 8) & 0xff}, ${argb & 0xff}, ${alpha})`;
+}
+
 /// The longest prefix of `bytes` no longer than `limit` that does not cut a
 /// character in half.
 function cutUtf8(bytes, limit) {
@@ -357,6 +408,16 @@ class Win {
     this.area = null;
     this.sawDelete = false;
     this.sawEnter = false;
+
+    /// The bar above a phone's keyboard: the field the program last said it
+    /// has - null until it says, each time text input starts - the bar's
+    /// elements once made, whether it shows, what it last said, and whether
+    /// the last press was a finger's, which is what wants it.
+    this.barField = null;
+    this.bar = null;
+    this.barShown = false;
+    this.barSaid = "";
+    this.fingerLast = false;
 
     /// Asked for and turned down, for want of a click. Tried again inside
     /// the next one.
@@ -1054,6 +1115,10 @@ export class Platform {
     /// browser fires before the key comes back up.
     this.pasteShortcut = false;
 
+    /// The faces bars above a phone's keyboard were given, by where the
+    /// program keeps them: one `FontFace` each.
+    this.barFaces = new Map();
+
     this.decoder = new TextDecoder();
     this.encoder = new TextEncoder();
     this.cachedU8 = null;
@@ -1345,6 +1410,13 @@ export class Platform {
           if (!win) return;
           win.area = { x, y, width: width >>> 0, height: height >>> 0 };
           self.placeField(win);
+        },
+
+        setTextInputField: (handle, fieldPtr, textPtr, textLen, hintPtr, hintLen, fontPtr, fontLen) => {
+          const win = self.windows.get(handle);
+          if (!win) return;
+          win.barField = self.readField(fieldPtr >>> 0, textPtr, textLen, hintPtr, hintLen, fontPtr >>> 0, fontLen >>> 0);
+          if (win.textInput && self.barWanted(win)) self.showBar(win);
         },
 
         monitor: (ptr) => self.writeMonitor(ptr >>> 0),
@@ -1837,6 +1909,7 @@ export class Platform {
       (document.exitFullscreen ?? document.webkitExitFullscreen)?.call(document)?.catch?.(() => {});
     }
     win.field?.remove();
+    win.bar?.remove();
 
     if (win.entry) {
       // The page's canvas goes back the way it came, and back in the pool.
@@ -2035,12 +2108,22 @@ export class Platform {
 
   hasFocus(win) {
     const active = document.activeElement;
-    return document.hasFocus() && (active === win.canvas || (win.field !== null && active === win.field));
+    return (
+      document.hasFocus() &&
+      (active === win.canvas || (win.field !== null && active === win.field) || (win.barShown && win.bar.contains(active)))
+    );
+  }
+
+  /// What takes the keyboard: the bar while it shows - a tap in the game
+  /// keeps typing there, and the game says whether it goes on - the hidden
+  /// field while text input is on, and the canvas otherwise.
+  typingTarget(win) {
+    if (win.barShown) return win.barInput;
+    return win.textInput && win.field ? win.field : win.canvas;
   }
 
   focusWindow(win) {
-    const target = win.textInput && win.field ? win.field : win.canvas;
-    target.focus({ preventScroll: true });
+    this.typingTarget(win).focus({ preventScroll: true });
   }
 
   /// Worked out once the focus has settled rather than in the handler: moving
@@ -2223,6 +2306,7 @@ export class Platform {
   }
 
   pointerDown(win, event) {
+    win.fingerLast = event.pointerType === "touch";
     // Every finger is a touch of its own; the first is the mouse as well, and
     // a second finger is not a second mouse.
     if (event.pointerType === "touch") this.touch(win, event, 0);
@@ -2257,9 +2341,10 @@ export class Platform {
       // Safari raises a phone's keyboard only for a field focused inside a
       // tap, and a tap is this.
       this.gesture();
-      if (win.textInput && win.field) {
-        win.field.blur();
-        win.field.focus({ preventScroll: true });
+      if (win.textInput) {
+        const target = this.typingTarget(win);
+        target.blur();
+        target.focus({ preventScroll: true });
       }
     }
     this.moved(win, event, false);
@@ -2639,6 +2724,8 @@ export class Platform {
 
   stopText(win) {
     win.textInput = false;
+    win.barField = null;
+    this.hideBar(win);
     if (win.composing) {
       win.composing = false;
       this.queue({ kind: KIND.preedit, win: win.id, a: -1, b: -1, text: "" });
@@ -2646,6 +2733,240 @@ export class Platform {
     if (win.field && document.activeElement === win.field) {
       win.canvas.focus({ preventScroll: true });
     }
+  }
+
+  // -- the bar above a phone's keyboard --
+
+  /// A phone's: a page pressed last with a finger, or one whose pointer is a
+  /// finger. A mouse and a keyboard type into the program's own field, as
+  /// they would on a desktop.
+  barWanted(win) {
+    return win.fingerLast || window.matchMedia?.("(pointer: coarse)")?.matches === true;
+  }
+
+  /// `setTextInputField`'s field: its text, caret, kind, placeholder, face
+  /// and look, read from the program's memory - the face copied once, by
+  /// where it is kept.
+  readField(fieldPtr, textPtr, textLen, hintPtr, hintLen, fontPtr, fontLen) {
+    const view = this.view;
+    const u32 = (offset) => view.getUint32(fieldPtr + offset, true);
+    const f32 = (offset) => view.getFloat32(fieldPtr + offset, true);
+    const text = this.text(textPtr, textLen);
+    const flags = u32(8);
+    const box = (at) => ({ background: u32(at), border: u32(at + 4), text: u32(at + 8) });
+    const sizes = (at) => ({ borderWidth: f32(at), radius: f32(at + 4), paddingX: f32(at + 8), paddingY: f32(at + 12) });
+    let look = null;
+    if (flags & FIELD_LOOK) {
+      const fontKey = fontLen > 0 ? `${fontPtr}:${fontLen}` : "";
+      if (fontKey && !this.barFaces.has(fontKey)) this.barFace(fontKey, this.u8.slice(fontPtr, fontPtr + fontLen));
+      look = {
+        bar: u32(16),
+        field: { ...box(20), ...sizes(48) },
+        hint: u32(32),
+        button: { ...box(36), ...sizes(64) },
+        fontSize: f32(80),
+        fontKey,
+      };
+    }
+    return {
+      text,
+      start: unitsAt(text, u32(0)),
+      end: unitsAt(text, u32(4)),
+      password: (flags & FIELD_PASSWORD) !== 0,
+      multiline: (flags & FIELD_MULTILINE) !== 0,
+      maxLength: u32(12),
+      hint: this.text(hintPtr, hintLen),
+      look,
+    };
+  }
+
+  /// A face from a file's bytes, loaded once and named after where the
+  /// program keeps it.
+  barFace(key, bytes) {
+    const family = `fluxion-bar-${this.barFaces.size}`;
+    this.barFaces.set(key, family);
+    try {
+      new FontFace(family, bytes).load().then(
+        (face) => document.fonts.add(face),
+        () => {},
+      );
+    } catch {
+      // A face the browser cannot read: the bar keeps the system's.
+    }
+  }
+
+  /// The bar up with the program's field in it, or brought up to it: its
+  /// text, caret, kind, placeholder and look. Typing goes there from now on.
+  showBar(win) {
+    const field = win.barField;
+    if (!win.bar) this.makeBar(win);
+    const input = field.multiline ? win.barArea : win.barLine;
+    (field.multiline ? win.barLine : win.barArea).style.display = "none";
+    input.style.display = "";
+    win.barInput = input;
+    if (!field.multiline) input.type = field.password ? "password" : "text";
+    input.placeholder = field.hint;
+    if (field.maxLength > 0) input.maxLength = field.maxLength;
+    else input.removeAttribute("maxlength");
+    if (input.value !== field.text) input.value = field.text;
+    input.setSelectionRange(field.start, field.end);
+    // What the bar holds now is what the program said: not said back to it.
+    win.barSaid = `${input.selectionStart}:${input.selectionEnd}:${input.value}`;
+    this.styleBar(win, field);
+    win.bar.style.display = "flex";
+    win.barShown = true;
+    this.placeBar(win);
+    if (document.activeElement !== input) input.focus({ preventScroll: true });
+  }
+
+  hideBar(win) {
+    if (!win.bar || !win.barShown) return;
+    win.barShown = false;
+    win.bar.style.display = "none";
+    if (win.bar.contains(document.activeElement)) win.canvas.focus({ preventScroll: true });
+  }
+
+  makeBar(win) {
+    const options = { signal: win.controller.signal };
+    const bar = document.createElement("div");
+    bar.className = `fluxion-bar-${win.id}`;
+    Object.assign(bar.style, {
+      position: "fixed",
+      left: "0px",
+      top: "0px",
+      display: "none",
+      alignItems: "center",
+      gap: "8px",
+      padding: "6px 8px",
+      boxSizing: "border-box",
+      zIndex: "2147483647",
+    });
+    // The placeholder's colour has no style property of its own.
+    const sheet = document.createElement("style");
+    const line = document.createElement("input");
+    const area = document.createElement("textarea");
+    area.rows = 3;
+    for (const input of [line, area]) {
+      for (const [name, value] of [
+        ["autocomplete", "off"],
+        ["aria-label", "text input"],
+        ["enterkeyhint", "done"],
+      ]) {
+        input.setAttribute(name, value);
+      }
+      Object.assign(input.style, { flex: "1", minWidth: "0", boxSizing: "border-box", outline: "none", resize: "none", margin: "0" });
+      input.addEventListener("input", () => this.barEdited(win), options);
+      input.addEventListener("keydown", (event) => this.barKeyDown(win, event), options);
+      // The window keeps the keyboard while the bar has it.
+      input.addEventListener("focus", () => this.focusChanged(), options);
+      input.addEventListener("blur", () => this.focusChanged(), options);
+      // A caret moved with no change to the text: the arrows, a tap, a
+      // selection. Said once whichever of these a browser has.
+      for (const name of ["select", "selectionchange", "keyup", "pointerup"]) {
+        input.addEventListener(name, () => this.barEdited(win), options);
+      }
+    }
+    document.addEventListener(
+      "selectionchange",
+      () => {
+        if (win.barShown && document.activeElement === win.barInput) this.barEdited(win);
+      },
+      options,
+    );
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.textContent = "OK";
+    // Pressed without taking the focus, so the keyboard stays up till it is let go.
+    ok.addEventListener("pointerdown", (event) => event.preventDefault(), options);
+    ok.addEventListener("click", () => this.barDone(win, true), options);
+    bar.append(sheet, line, area, ok);
+    document.body.appendChild(bar);
+    for (const name of ["resize", "scroll"]) window.visualViewport?.addEventListener(name, () => this.placeBar(win), options);
+    window.addEventListener("resize", () => this.placeBar(win), options);
+    win.bar = bar;
+    win.barSheet = sheet;
+    win.barLine = line;
+    win.barArea = area;
+    win.barOk = ok;
+  }
+
+  /// At the bottom of what the reader sees, which a keyboard that came up has
+  /// moved: on top of the keyboard.
+  placeBar(win) {
+    if (!win.barShown) return;
+    const view = window.visualViewport;
+    const width = view ? view.width : window.innerWidth;
+    const bottom = view ? view.offsetTop + view.height : window.innerHeight;
+    Object.assign(win.bar.style, {
+      left: `${view ? view.offsetLeft : 0}px`,
+      width: `${width}px`,
+      top: `${Math.max(0, bottom - win.bar.offsetHeight)}px`,
+    });
+  }
+
+  /// The program's look, its sizes from the drawing buffer's pixels to CSS
+  /// ones; or the bar's own.
+  styleBar(win, field) {
+    const look = field.look;
+    const [perX] = this.pixelsPerCss(win);
+    const px = (value) => `${value / perX}px`;
+    // Sixteen pixels at least: Safari zooms the page in on smaller text.
+    const size = look ? Math.max(16, look.fontSize / perX) : 18;
+    const family = look?.fontKey ? `"${this.barFaces.get(look.fontKey)}", sans-serif` : "";
+    const boxStyle = (box) => ({
+      background: cssColor(box.background),
+      color: cssColor(box.text),
+      border: box.borderWidth > 0 ? `${px(box.borderWidth)} solid ${cssColor(box.border)}` : "none",
+      borderRadius: px(box.radius),
+      padding: `${px(box.paddingY)} ${px(box.paddingX)}`,
+      fontSize: `${size}px`,
+      fontFamily: family,
+    });
+    win.bar.style.background = look ? cssColor(look.bar) : "rgba(32, 32, 36, 0.94)";
+    const plain = { background: "#2e2e34", color: "#ffffff", border: "1px solid #5a5a66", borderRadius: "6px", padding: "8px 12px", fontSize: "18px", fontFamily: "" };
+    for (const input of [win.barLine, win.barArea]) Object.assign(input.style, look ? boxStyle(look.field) : plain);
+    Object.assign(
+      win.barOk.style,
+      look ? boxStyle(look.button) : { background: "", color: "", border: "", borderRadius: "", padding: "8px 14px", fontSize: "16px", fontFamily: "" },
+    );
+    win.barSheet.textContent = `.fluxion-bar-${win.id} ::placeholder { color: ${look ? cssColor(look.hint) : "#8a8a94"}; }`;
+  }
+
+  /// What the bar holds and where its caret is, to the program, whole -
+  /// in pieces a drain holds - when either changed.
+  barEdited(win) {
+    const input = win.barInput;
+    if (!win.barShown || !input) return;
+    const value = input.value;
+    const start = input.selectionStart ?? value.length;
+    const end = input.selectionEnd ?? value.length;
+    const said = `${start}:${end}:${value}`;
+    if (said === win.barSaid) return;
+    win.barSaid = said;
+    const a = utf8Length(value.slice(0, start));
+    const b = utf8Length(value.slice(0, end));
+    const pieces = piecesOf(value, BAR_PIECE);
+    pieces.forEach((piece, at) => {
+      this.queue({ kind: KIND.textEdited, win: win.id, a, b, c: at + 1 < pieces.length ? 1 : 0, text: piece });
+    });
+  }
+
+  /// Enter finishes a field that takes no lines, as OK does; Escape puts the
+  /// bar away. The rest is the field's own.
+  barKeyDown(win, event) {
+    if (event.key === "Enter" && !win.barField?.multiline) {
+      event.preventDefault();
+      this.barDone(win, true);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      this.barDone(win, false);
+    }
+  }
+
+  barDone(win, submitted) {
+    this.barEdited(win);
+    this.queue({ kind: KIND.textDone, win: win.id, a: submitted ? 1 : 0 });
+    this.hideBar(win);
   }
 
   /// The hidden field an input method and a soft keyboard attach to, which a

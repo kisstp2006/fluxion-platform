@@ -52,8 +52,25 @@ pub const Canvas = struct {
     raw_motion: bool = false,
     text_input: bool = false,
     area: [4]i32 = @splat(0),
+    /// The field the bar above a phone's keyboard was last told of, and the
+    /// first bytes of its text, placeholder and face.
+    field: wire.TextField = .{},
+    field_text: [64]u8 = @splat(0),
+    field_text_len: usize = 0,
+    field_hint: [64]u8 = @splat(0),
+    field_hint_len: usize = 0,
+    field_font_len: usize = 0,
+
     limits: [4]u32 = @splat(0),
     gl_version: u32 = 0,
+
+    pub fn fieldText(self: *const Canvas) []const u8 {
+        return self.field_text[0..self.field_text_len];
+    }
+
+    pub fn fieldHint(self: *const Canvas) []const u8 {
+        return self.field_hint[0..self.field_hint_len];
+    }
 };
 
 /// Everything the fake page is, and everything it was told.
@@ -401,6 +418,26 @@ pub fn setTextInput(handle: u32, on: u32) u32 {
 pub fn setTextInputArea(handle: u32, x: i32, y: i32, width: u32, height: u32) void {
     const slot = canvas(handle) orelse return;
     slot.area = .{ x, y, @intCast(width), @intCast(height) };
+}
+
+pub fn setTextInputField(
+    handle: u32,
+    field: *const wire.TextField,
+    text: [*]const u8,
+    text_len: u32,
+    hint: [*]const u8,
+    hint_len: u32,
+    font: [*]const u8,
+    font_len: u32,
+) void {
+    _ = font;
+    const slot = canvas(handle) orelse return;
+    slot.field = field.*;
+    slot.field_text_len = @min(text_len, slot.field_text.len);
+    @memcpy(slot.field_text[0..slot.field_text_len], text[0..slot.field_text_len]);
+    slot.field_hint_len = @min(hint_len, slot.field_hint.len);
+    @memcpy(slot.field_hint[0..slot.field_hint_len], hint[0..slot.field_hint_len]);
+    slot.field_font_len = font_len;
 }
 
 pub fn monitor(info: *wire.MonitorInfo) u32 {
