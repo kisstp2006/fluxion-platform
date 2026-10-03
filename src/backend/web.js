@@ -1035,10 +1035,17 @@ export class Files {
       path_symlink: () => ERRNO.notsup,
       path_link: () => ERRNO.notsup,
     };
+    // Every number WASI passes is unsigned - a descriptor, an address, a
+    // length, flags - but a wasm32 one reaches JavaScript signed, negative
+    // past 2 GB, which a view or a typed array refuses. Read as what they
+    // are, here, for every call; the 64-bit ones come as BigInts and are
+    // left alone.
+    const unsigned = (call) => (...args) => call(...args.map((arg) => (typeof arg === "number" ? arg >>> 0 : arg)));
     const out = {};
     for (const imported of WebAssembly.Module.imports(module)) {
       if (imported.module === "wasi_snapshot_preview1" && imported.kind === "function") {
-        out[imported.name] = calls[imported.name] ?? (() => ERRNO.nosys);
+        const call = calls[imported.name];
+        out[imported.name] = call ? unsigned(call) : () => ERRNO.nosys;
       }
     }
     return { wasi_snapshot_preview1: out };
