@@ -532,6 +532,7 @@ before anything is tried.
 const settings = try platform.folders.path(gpa, io, .config);   // %APPDATA%, ~/.config
 const face = try platform.fonts.systemUi(gpa, io);              // Segoe UI, what fontconfig picks
 const code = try platform.fonts.systemMono(gpa, io);            // Cascadia Mono, DejaVu Sans Mono
+const emoji = try platform.fonts.systemEmoji(gpa, io);          // Segoe UI Emoji, Noto Color Emoji
 try platform.shell.showInFolder(gpa, io, "C:/game/art/hero.png");
 try platform.shell.openUrl(gpa, io, "https://ziglang.org/");
 ```
@@ -552,13 +553,17 @@ the file and its index - Microsoft YaHei UI is the second face of `msyh.ttc`.
 **`fonts.systemMono` is the one code and terminals are set in**: Cascadia
 Mono where Windows has it and Consolas where it has not, what fontconfig makes
 of `monospace`, SF Mono or Menlo on a Mac, Droid Sans Mono on a phone.
+**`fonts.systemEmoji` is the list emoji are drawn from**, in colour: Segoe UI
+Emoji; Noto Color Emoji and, from Android 12, its flags beside it; what
+fontconfig makes of `emoji`, or Noto Color Emoji where a distribution puts it.
+Empty on a Mac, whose Apple Color Emoji is in a format of its own.
 
 **`shell` says what went wrong**, where starting `explorer` or `xdg-open` and
 hoping says nothing: `error.FileNotFound`, `error.NoHandler` when nothing opens
 that kind of thing, `error.Refused`. `shell.support` says which of the three
 calls a build has.
 
-| | `folders` | `fonts.systemUi`, `fonts.systemMono` | `shell` |
+| | `folders` | `fonts.systemUi`, `fonts.systemMono`, `fonts.systemEmoji` | `shell` |
 | --- | --- | --- | --- |
 | Windows | `SHGetKnownFolderPath`: the roaming profile for config and data, the local one for the cache | `SPI_GETNONCLIENTMETRICS`, then the registry's font list; Cascadia Mono, else Consolas | `ShellExecuteW`; `SHOpenFolderAndSelectItems`, with the file selected |
 | Linux, BSD | the XDG base directories, and `user-dirs.dirs` for documents | fontconfig's `sans-serif` and `monospace`, loaded when asked; a list of the usual files without it | the portal's `OpenURI` for an address and the file manager's `ShowItems` over D-Bus, then `xdg-open`, whose exit code is read |
@@ -921,7 +926,8 @@ memory and is copied into the module's a read at a time, so a large pack costs
 the module nothing until it is read. Nothing waits: a sleep returns at once,
 because the frame is the browser's to give. Sockets and links answer
 `ENOSYS`. `folders.path` is `/user` - the cache `/tmp` - and `fonts.systemUi`
-the `/fonts/ui.ttf` a page puts there, `/fonts/mono.ttf` for code.
+the `/fonts/ui.ttf` a page puts there, `/fonts/mono.ttf` for code, and
+`fonts.systemEmoji` its `/fonts/emoji.ttf` and `/fonts/emoji-flags.ttf`.
 
 **A lost context is the Android pair of events.** A GPU reset, or a phone
 taking the memory back, arrives as `.surface_lost`; the context coming back

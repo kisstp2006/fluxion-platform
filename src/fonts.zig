@@ -8,6 +8,8 @@
 //! defer face.deinit(gpa);
 //! const code = try platform.fonts.systemMono(gpa, io);
 //! defer code.deinit(gpa);
+//! const emoji = try platform.fonts.systemEmoji(gpa, io);
+//! defer platform.fonts.freeAll(gpa, emoji);
 //! ```
 //!
 //! Asked of the system rather than guessed from a list of paths: Segoe UI is
@@ -16,7 +18,8 @@
 //!
 //! A page has no font a program can open, so in a browser, under WASI, the
 //! system's fonts are the ones the page puts in its files: `/fonts/ui.ttf`,
-//! and `/fonts/mono.ttf` for code, or the first where there is no second.
+//! and `/fonts/mono.ttf` for code, or the first where there is no second;
+//! `/fonts/emoji.ttf` and `/fonts/emoji-flags.ttf` for emoji.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -78,7 +81,68 @@ pub fn systemMono(gpa: Allocator, io: std.Io) Error!Face {
     }
 }
 
+/// The fonts the system draws emoji in, in colour, most wanted first: Segoe
+/// UI Emoji on Windows; Noto Color Emoji and its flags on a phone; what
+/// fontconfig makes of `emoji` on Linux, or the usual places of Noto Color
+/// Emoji. Empty where there is none a font library can draw - a Mac's Apple
+/// Color Emoji keeps its pictures in a table of its own.
+pub fn systemEmoji(gpa: Allocator, io: std.Io) Error![]Face {
+    if (comptime !available) return error.Unsupported;
+    if (comptime platform.is_web) return allThere(gpa, io, &web_emoji_files);
+    if (comptime builtin.os.tag == .windows) {
+        const face = windows.byName(gpa, "Segoe UI Emoji") catch |err| switch (err) {
+            error.NotFound, error.Unsupported => return gpa.alloc(Face, 0),
+            else => return err,
+        };
+        errdefer face.deinit(gpa);
+        const list = try gpa.alloc(Face, 1);
+        list[0] = face;
+        return list;
+    }
+    if (comptime builtin.abi.isAndroid()) return allThere(gpa, io, &android_emoji_files);
+    if (comptime builtin.os.tag == .macos) return gpa.alloc(Face, 0);
+    if (fontconfig.match(gpa, "emoji")) |face| {
+        // Without an emoji font, fontconfig answers with whatever is nearest
+        // - DejaVu Sans - and that is no answer.
+        if (std.ascii.indexOfIgnoreCase(std.fs.path.basename(face.path), "emoji") != null) {
+            errdefer face.deinit(gpa);
+            const list = try gpa.alloc(Face, 1);
+            list[0] = face;
+            return list;
+        }
+        face.deinit(gpa);
+    } else |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {},
+    }
+    return firstOf(gpa, io, &linux_emoji_files);
+}
+
+/// What `systemEmoji` gave.
+pub fn freeAll(gpa: Allocator, faces: []Face) void {
+    for (faces) |face| face.deinit(gpa);
+    gpa.free(faces);
+}
+
 const Known = struct { path: []const u8, index: u32 = 0 };
+
+const web_emoji_files = [_]Known{ .{ .path = "/fonts/emoji.ttf" }, .{ .path = "/fonts/emoji-flags.ttf" } };
+
+/// Android 12 on keeps the flags apart from the rest.
+const android_emoji_files = [_]Known{
+    .{ .path = "/system/fonts/NotoColorEmoji.ttf" },
+    .{ .path = "/system/fonts/NotoColorEmojiFlags.ttf" },
+};
+
+/// Debian and Ubuntu, Fedora, Arch, and the rest.
+const linux_emoji_files = [_]Known{
+    .{ .path = "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf" },
+    .{ .path = "/usr/share/fonts/google-noto-color-emoji-fonts/NotoColorEmoji.ttf" },
+    .{ .path = "/usr/share/fonts/google-noto-emoji/NotoColorEmoji.ttf" },
+    .{ .path = "/usr/share/fonts/noto/NotoColorEmoji.ttf" },
+    .{ .path = "/usr/share/fonts/TTF/NotoColorEmoji.ttf" },
+    .{ .path = "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf" },
+};
 
 const web_files = [_]Known{.{ .path = "/fonts/ui.ttf" }};
 const web_mono_files = [_]Known{ .{ .path = "/fonts/mono.ttf" }, .{ .path = "/fonts/ui.ttf" } };
@@ -131,6 +195,36 @@ const linux_mono_files = [_]Known{
     .{ .path = "/usr/share/fonts/noto/NotoSansMono-Regular.ttf" },
     .{ .path = "/usr/share/fonts/liberation/LiberationMono-Regular.ttf" },
 };
+
+/// Every one of `files` that is there.
+fn allThere(gpa: Allocator, io: std.Io, files: []const Known) Error![]Face {
+    var found: std.ArrayList(Face) = .empty;
+    errdefer {
+        for (found.items) |face| face.deinit(gpa);
+        found.deinit(gpa);
+    }
+    for (files) |file| {
+        std.Io.Dir.cwd().access(io, file.path, .{}) catch continue;
+        const path = try gpa.dupe(u8, file.path);
+        found.append(gpa, .{ .path = path, .index = file.index }) catch |err| {
+            gpa.free(path);
+            return err;
+        };
+    }
+    return found.toOwnedSlice(gpa);
+}
+
+/// The first of `files` that is there, as a list of one, or none.
+fn firstOf(gpa: Allocator, io: std.Io, files: []const Known) Error![]Face {
+    const face = firstThere(gpa, io, files) catch |err| switch (err) {
+        error.NotFound => return gpa.alloc(Face, 0),
+        else => return err,
+    };
+    errdefer face.deinit(gpa);
+    const list = try gpa.alloc(Face, 1);
+    list[0] = face;
+    return list;
+}
 
 fn firstThere(gpa: Allocator, io: std.Io, files: []const Known) Error!Face {
     for (files) |file| {
@@ -384,6 +478,15 @@ test "the code font is a file that is there" {
     };
     defer face.deinit(testing.allocator);
     try std.Io.Dir.cwd().access(testing.io, face.path, .{});
+}
+
+test "the emoji fonts are files that are there" {
+    if (!available or builtin.abi.isAndroid()) return error.SkipZigTest;
+    const faces = try systemEmoji(testing.allocator, testing.io);
+    defer freeAll(testing.allocator, faces);
+    for (faces) |face| try std.Io.Dir.cwd().access(testing.io, face.path, .{});
+    // Every Windows since 8.1 has Segoe UI Emoji.
+    if (builtin.os.tag == .windows) try testing.expect(faces.len == 1);
 }
 
 test "the interface font is a file that is there" {
