@@ -31,6 +31,10 @@ import android.provider.OpenableColumns;
 import android.text.Editable;
 import android.text.InputFilter;
 import android.text.InputType;
+import android.text.Selection;
+import android.text.SpanWatcher;
+import android.text.Spannable;
+import android.text.Spanned;
 import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -50,9 +54,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 
-// It is the bar's TextWatcher itself: `android-dex` compiles one class file,
-// so there is no inner class to be one.
-public class FluxionActivity extends NativeActivity implements TextWatcher {
+// It is the bar's TextWatcher and SpanWatcher itself: `android-dex` compiles
+// one class file, so there is no inner class to be one.
+public class FluxionActivity extends NativeActivity implements TextWatcher, SpanWatcher {
     /** Registered by the native library as the activity starts. */
     private static native void answered(int id, String[] names, String[] uris);
 
@@ -353,6 +357,8 @@ public class FluxionActivity extends NativeActivity implements TextWatcher {
         if (!barText.getText().toString().equals(text)) barText.setText(text);
         int length = barText.length();
         barText.setSelection(Math.max(0, Math.min(start, length)), Math.max(0, Math.min(end, length)));
+        // Last: setting the input type or the filters makes the text again.
+        watchSelection();
         barQuiet = false;
         // The window asks for the keyboard as it takes the focus.
         if (!bar.isShowing()) {
@@ -431,9 +437,38 @@ public class FluxionActivity extends NativeActivity implements TextWatcher {
     /** Every change, whole: what the keyboard composes is part of it until it commits. */
     @Override
     public void afterTextChanged(Editable text) {
-        if (barQuiet) return;
+        tellEdited();
+    }
+
+    /**
+     * The caret and the selection are spans of the text: watched, so one moved
+     * with no change to the text - a tap in the bar, the keyboard's arrows - is
+     * told as well. On the text the bar holds now: `setText`, `setInputType`
+     * and `setFilters` make another, and a watcher is not copied to it.
+     */
+    private void watchSelection() {
+        Editable text = barText.getText();
+        text.setSpan(this, 0, text.length(), Spanned.SPAN_INCLUSIVE_INCLUSIVE);
+    }
+
+    @Override
+    public void onSpanAdded(Spannable text, Object what, int start, int end) {
+        if (what == Selection.SELECTION_START || what == Selection.SELECTION_END) tellEdited();
+    }
+
+    @Override
+    public void onSpanRemoved(Spannable text, Object what, int start, int end) {}
+
+    @Override
+    public void onSpanChanged(Spannable text, Object what, int oldStart, int oldEnd, int start, int end) {
+        if (what == Selection.SELECTION_START || what == Selection.SELECTION_END) tellEdited();
+    }
+
+    /** The bar's text and caret, to the native half: a later one takes an unread one's place there. */
+    private void tellEdited() {
+        if (barQuiet || barText == null) return;
         try {
-            textBarEdited(text.toString(), barText.getSelectionStart(), barText.getSelectionEnd());
+            textBarEdited(barText.getText().toString(), barText.getSelectionStart(), barText.getSelectionEnd());
         } catch (UnsatisfiedLinkError e) {
             // No native half to tell.
         }
