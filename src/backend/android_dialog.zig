@@ -214,7 +214,7 @@ fn strings(env: jni.JniEnv, array: jni.JObject) error{ OutOfMemory, Unavailable 
 
 /// A Java string from UTF-8, through UTF-16: `NewStringUTF` reads modified
 /// UTF-8, which spells a character above U+FFFF differently.
-fn newString(env: jni.JniEnv, text: []const u8) Error!jni.JObject {
+pub fn newString(env: jni.JniEnv, text: []const u8) Error!jni.JObject {
     const new_string = env.*.NewString orelse return error.Unavailable;
     var units: std.ArrayListUnmanaged(u16) = .empty;
     defer units.deinit(heap);
@@ -225,16 +225,17 @@ fn newString(env: jni.JniEnv, text: []const u8) Error!jni.JObject {
     return string;
 }
 
-fn methodOf(env: jni.JniEnv, class: jni.JClass, name: [*:0]const u8, signature: [*:0]const u8) jni.JMethodId {
+pub fn methodOf(env: jni.JniEnv, class: jni.JClass, name: [*:0]const u8, signature: [*:0]const u8) jni.JMethodId {
     const get = env.*.GetMethodID orelse return null;
     const method = get(env, class, name, signature);
     return if (jni.threw(env)) null else method;
 }
 
-const Frame = struct {
+/// A frame of local references, let go of together when a call is done.
+pub const Frame = struct {
     env: jni.JniEnv,
 
-    fn enter(env: jni.JniEnv) ?Frame {
+    pub fn enter(env: jni.JniEnv) ?Frame {
         const push = env.*.PushLocalFrame orelse return null;
         if (env.*.PopLocalFrame == null) return null;
         if (push(env, 16) != jni.ok) {
@@ -244,7 +245,7 @@ const Frame = struct {
         return .{ .env = env };
     }
 
-    fn leave(self: Frame) void {
+    pub fn leave(self: Frame) void {
         _ = self.env.*.PopLocalFrame.?(self.env, null);
     }
 };

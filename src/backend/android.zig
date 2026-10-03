@@ -53,6 +53,7 @@ const text_mod = @import("../text.zig");
 const android_text = @import("android_text.zig");
 const android_clipboard = @import("android_clipboard.zig");
 const android_dialog = @import("android_dialog.zig");
+const android_text_bar = @import("android_text_bar.zig");
 const android_shell = @import("android_shell.zig");
 const jni = @import("jni.zig");
 const virtual_key = @import("virtual_key.zig");
@@ -143,12 +144,10 @@ const looper_poll_timeout: c_int = -3;
 const looper_poll_error: c_int = -4;
 const looper_event_input: c_int = 1 << 0;
 
-/// `ANATIVEACTIVITY_SHOW_SOFT_INPUT_IMPLICIT`: the keyboard appears because a
-/// text field has focus, rather than because the user asked for it. Implicit is
-/// right here - the program said a field has focus, not that a person tapped a
-/// keyboard button - and it is what lets the system take the keyboard away
-/// again on its own.
-const show_soft_input_implicit: u32 = 0x0001;
+/// `ANATIVEACTIVITY_SHOW_SOFT_INPUT_FORCED`: implicit, which says only that a
+/// field has focus, is a keyboard most systems never raise for a view that
+/// takes no text - which a `NativeActivity`'s is.
+const show_soft_input_forced: u32 = 0x0002;
 /// `ANATIVEACTIVITY_HIDE_SOFT_INPUT_NOT_ALWAYS`: hide it unless the user
 /// pinned it open.
 const hide_soft_input_not_always: u32 = 0x0001;
@@ -284,6 +283,10 @@ pub const Cmd = enum(u8) {
     /// The system's own edges moved - a rotation, a bar coming or going - and
     /// `Glue.insets` holds them.
     insets_changed,
+    /// The text bar was typed into, and `Glue.bar_change` holds what it has.
+    text_edited,
+    /// The text bar was put away, and `Glue.bar_done` says how.
+    text_done,
     _,
 };
 
@@ -327,6 +330,13 @@ pub const Glue = struct {
     /// The last file dialog's answer, as an `*android_dialog.Answer`, set by
     /// the Java thread that heard it just before `.dialog_answered`.
     answer: std.atomic.Value(usize) = .init(0),
+
+    /// What the text bar holds after its last change, as an
+    /// `*android_text_bar.Change`: each change is the whole text, so a
+    /// later one takes an unread one's place.
+    bar_change: std.atomic.Value(usize) = .init(0),
+    /// How the bar was put away: 0 not, 1 put away, 2 by its Done.
+    bar_done: std.atomic.Value(u8) = .init(0),
 
     /// UI thread writes commands, app thread reads them.
     cmd_pipe: [2]c_int = .{ -1, -1 },
@@ -524,11 +534,19 @@ pub fn nativeActivityOnCreate(
     if (activity.env) |env| {
         const jni_env: jni.JniEnv = @ptrCast(@alignCast(env));
         _ = android_dialog.register(jni_env, activity.clazz, &answered);
-        const methods = [_]jni.NativeMethod{.{
+        const methods = [_]jni.NativeMethod{ .{
             .name = "insetsChanged",
             .signature = "(IIII)V",
             .function = &insetsChanged,
-        }};
+        }, .{
+            .name = "textBarEdited",
+            .signature = android_text_bar.edited_signature,
+            .function = &textBarEdited,
+        }, .{
+            .name = "textBarDone",
+            .signature = android_text_bar.done_signature,
+            .function = &textBarDone,
+        } };
         _ = jni.registerNatives(jni_env, activity.clazz, &methods);
     }
 
@@ -615,6 +633,23 @@ fn insetsChanged(env: jni.JniEnv, class: jni.JClass, left: i32, top: i32, right:
     const packed_insets = edges.pack();
     if (glue.insets.swap(packed_insets, .acq_rel) == packed_insets) return;
     glue.writeCmd(.insets_changed);
+}
+
+/// `FluxionActivity.textBarEdited`, on the UI thread as the bar changes.
+/// Copied out and handed over the way a dialog's answer is.
+fn textBarEdited(env: jni.JniEnv, class: jni.JClass, string: jni.JObject, start: i32, end: i32) callconv(.c) void {
+    _ = class;
+    const change = android_text_bar.Change.fromJava(env, string, start, end) orelse return;
+    const earlier = glue.bar_change.swap(@intFromPtr(change), .acq_rel);
+    if (earlier != 0) @as(*android_text_bar.Change, @ptrFromInt(earlier)).destroy();
+    glue.writeCmd(.text_edited);
+}
+
+/// `FluxionActivity.textBarDone`, on the UI thread as the bar goes.
+fn textBarDone(env: jni.JniEnv, class: jni.JClass, submitted: u8) callconv(.c) void {
+    _ = .{ env, class };
+    glue.bar_done.store(if (submitted != 0) 2 else 1, .release);
+    glue.writeCmd(.text_done);
 }
 
 /// The activity, while there is one.
@@ -730,6 +765,18 @@ const Impl = struct {
     /// composition. Empty rather than null, because that is the truth.
     preedit: text_mod.Preedit = .{},
     devices: [gamepad.max_devices]gamepad.Device = @splat(.{}),
+
+    /// `FluxionActivity`'s text bar, over the same attachment. See
+    /// `android_text_bar`.
+    bar: android_text_bar.Backend = .{},
+    /// Whether the program described its field since text input went on:
+    /// the bar's changes are `.text_edited` then, and keys before.
+    bar_field: bool = false,
+    /// What the bar holds, as last heard or set.
+    bar_text: std.ArrayListUnmanaged(u8) = .empty,
+    /// What `editedText` answers, until the next pump.
+    edited: text_mod.Edited = .{},
+    edited_text: std.ArrayListUnmanaged(u8) = .empty,
 };
 
 const Native = struct {
@@ -778,6 +825,8 @@ pub const vtable: backend.Vtable = .{
     .setTextInput = setTextInput,
     .setTextInputArea = setTextInputArea,
     .preedit = preedit,
+    .setTextInputField = setTextInputField,
+    .editedText = editedText,
     .setClipboardText = setClipboardText,
     .clipboardText = clipboardText,
     .hasClipboardText = hasClipboardText,
@@ -854,6 +903,10 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     self.answers.deinit();
     const unread = glue.answer.swap(0, .acq_rel);
     if (unread != 0) @as(*android_dialog.Answer, @ptrFromInt(unread)).destroy();
+    self.bar_text.deinit(gpa);
+    self.edited_text.deinit(gpa);
+    const unheard = glue.bar_change.swap(0, .acq_rel);
+    if (unheard != 0) @as(*android_text_bar.Change, @ptrFromInt(unheard)).destroy();
     self.gl.close();
     self.lib.close();
     gpa.destroy(self);
@@ -1120,27 +1173,109 @@ fn pushChar(self: *Impl, id: event.WindowId, action: i32, code: i32, meta: i32) 
 ///
 /// The whole of input-method control on Android, and the one call that matters:
 /// a phone with no hardware keyboard types nothing at all until this is on.
+///
+/// With `FluxionActivity`, the keyboard comes with its text bar, which the
+/// keyboard types into: empty until the program describes its field, and
+/// typing as `.char` and Backspace until it does. A plain `NativeActivity`
+/// gets the keyboard alone, which a keyboard that composes has nowhere to
+/// type into.
 fn setTextInput(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
     const self = cast(impl);
     const win = castWindow(native);
     const activity = liveActivity() orelse return error.Unavailable;
 
-    if (on) {
-        self.a.ANativeActivity_showSoftInput(activity, show_soft_input_implicit);
+    if (barEnv(self, activity)) |env| {
+        if (on) {
+            self.bar_field = false;
+            self.bar_text.clearRetainingCapacity();
+            try self.bar.show(env, activity.clazz, .{}, true);
+        } else self.bar.hide(env, activity.clazz);
+    } else if (on) {
+        self.a.ANativeActivity_showSoftInput(activity, show_soft_input_forced);
     } else {
         self.a.ANativeActivity_hideSoftInput(activity, hide_soft_input_not_always);
     }
     win.text_input = on;
 }
 
+/// The field the text bar shows and edits, from now on as `.text_edited`.
+fn setTextInputField(impl: backend.Impl, native: backend.NativeWindow, field: text_mod.Field) Error!void {
+    const self = cast(impl);
+    if (!castWindow(native).text_input) return;
+    const activity = liveActivity() orelse return error.Unavailable;
+    const env = barEnv(self, activity) orelse return error.Unavailable;
+    self.bar_field = true;
+    self.bar_text.clearRetainingCapacity();
+    try self.bar_text.appendSlice(self.gpa, field.text);
+    try self.bar.show(env, activity.clazz, field, false);
+}
+
+fn editedText(impl: backend.Impl) ?*const text_mod.Edited {
+    return &cast(impl).edited;
+}
+
+/// The VM, with `FluxionActivity`'s bar looked up on it; null without one.
+fn barEnv(self: *Impl, activity: *ANativeActivity) ?jni.JniEnv {
+    if (!ensureText(self)) return null;
+    const env = self.text.env orelse return null;
+    return if (self.bar.open(env, activity.clazz)) env else null;
+}
+
+/// What the bar holds now: the program's field's whole text, or - for a
+/// program that described none - the keys that make the change.
+fn takeBarChange(self: *Impl, id: event.WindowId) Error!void {
+    const raw = glue.bar_change.swap(0, .acq_rel);
+    if (raw == 0) return;
+    const change: *android_text_bar.Change = @ptrFromInt(raw);
+    defer change.destroy();
+
+    if (self.bar_field) {
+        self.edited_text.clearRetainingCapacity();
+        try self.edited_text.appendSlice(self.gpa, change.text);
+        self.edited = .{
+            .text = self.edited_text.items,
+            .selection_start = change.selection_start,
+            .selection_end = change.selection_end,
+        };
+        push(self, .{ .text_edited = id });
+    } else {
+        const keys_of = android_text_bar.asKeys(self.bar_text.items, change.text);
+        for (0..keys_of.back) |_| pressKey(self, id, .backspace);
+        var typed = std.unicode.Utf8View.initUnchecked(keys_of.typed).iterator();
+        while (typed.nextCodepoint()) |codepoint| {
+            if (codepoint == '\n') {
+                pressKey(self, id, .enter);
+            } else if (codepoint >= 0x20 and codepoint != 0x7F) {
+                push(self, .{ .char = .{ .window = id, .codepoint = codepoint, .mods = .none } });
+            }
+        }
+    }
+    self.bar_text.clearRetainingCapacity();
+    try self.bar_text.appendSlice(self.gpa, change.text);
+}
+
+/// A key pressed and let go, for an edit the bar made.
+fn pressKey(self: *Impl, id: event.WindowId, key: keys.Key) void {
+    for ([_]keys.Action{ .press, .release }) |action| push(self, .{ .key = .{
+        .window = id,
+        .key = key,
+        .virtual = key,
+        .scancode = @enumFromInt(0),
+        .action = action,
+        .mods = .none,
+    } });
+}
+
 /// Nowhere to put it.
 ///
 /// A soft keyboard occupies the bottom of the screen whatever the program
-/// says, and a `NativeActivity` has no `InputConnection` to report a caret
-/// through. Refused rather than ignored.
+/// says. With `FluxionActivity` the typing is in its bar above the keyboard,
+/// which has a caret of its own, so there is nothing to place; a plain
+/// `NativeActivity` has no `InputConnection` to report a caret through, and
+/// refuses rather than ignores.
 fn setTextInputArea(impl: backend.Impl, native: backend.NativeWindow, area: text_mod.Area) Error!void {
-    _ = .{ impl, native, area };
-    return error.Unavailable;
+    _ = .{ native, area };
+    if (!cast(impl).bar.ready()) return error.Unavailable;
 }
 
 fn preedit(impl: backend.Impl) ?*const text_mod.Preedit {
@@ -1663,6 +1798,11 @@ pub fn handleCommand(self: *Impl, cmd: Cmd) Error!void {
         .pause, .stop => push(self, .{ .suspended = {} }),
         .low_memory => push(self, .{ .low_memory = {} }),
         .dialog_answered => try answerDialog(self),
+        .text_edited => try takeBarChange(self, id),
+        .text_done => {
+            const done = glue.bar_done.swap(0, .acq_rel);
+            if (done != 0) push(self, .{ .text_done = .{ .window = id, .submitted = done == 2 } });
+        },
         .insets_changed => push(self, .{ .safe_area = .{
             .window = id,
             .insets = insets_mod.Insets.unpack(glue.insets.load(.acquire)),

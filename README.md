@@ -334,6 +334,19 @@ and a character called `'`.
 on a phone and what lets an input method open a candidate window; a game that
 never calls it never gets one mid-firefight.
 
+**On a phone the typing is in a bar above the keyboard.** The keyboard covers
+the bottom of the screen, and often the field being typed into. With
+`FluxionActivity`, turning text input on raises the keyboard with a text field
+and an OK button on top of it, which is what a soft keyboard types and composes
+into. A program that says what its field holds - `window.setTextInputField`:
+the text, the caret, whether it is a password or takes lines, its placeholder,
+and how it looks, down to its face - has the bar show that, in that look, and
+hears each change whole: `.text_edited`, with the text and caret in
+`ctx.editedText()`. Pressing OK or the keyboard's Done, Back, or a tap past
+the bar is `.text_done`, which says whether it was submitted. A program that
+says nothing gets the bar's typing as `.char`, Backspace and Enter. On a
+desktop the field is the program's own, and `setTextInputField` does nothing.
+
 **AltGr is its own modifier, `mods.alt_graph`.** Windows - and every browser
 on it - reports the right alt of a European layout as control and alt held
 together, so a program that treated control as a shortcut ate every `@` a

@@ -116,6 +116,65 @@ pub const Area = struct {
     height: u32 = 0,
 };
 
+/// The text field that has the keyboard, as the program holds it: what a
+/// system that edits text somewhere of its own shows and edits. A phone puts
+/// it in a bar above its keyboard, so the person sees what they type while
+/// the keyboard covers the program's field. See `Window.setTextInputField`.
+pub const Field = struct {
+    text: []const u8 = "",
+    /// The caret, or a selection's two ends, as byte offsets into `text`.
+    selection_start: usize = 0,
+    selection_end: usize = 0,
+    /// Shown as dots while it is typed.
+    password: bool = false,
+    /// Enter starts a new line rather than finishing.
+    multiline: bool = false,
+    /// The most characters it takes, or 0 for no limit.
+    max_length: usize = 0,
+    /// What it shows while it is empty.
+    hint: []const u8 = "",
+    /// How the system shows it, from the program's own style for the field,
+    /// so the bar looks like the field it stands for; null for the system's
+    /// own look.
+    look: ?Look = null,
+};
+
+/// How a field shown somewhere of the system's own looks. Colours are
+/// 0xAARRGGBB; sizes are in the window's pixels.
+pub const Look = struct {
+    /// Behind the field and its button.
+    bar: u32 = 0xFF000000,
+    field: Box = .{},
+    /// The button that finishes the typing.
+    button: Box = .{},
+    /// What the field shows while it is empty.
+    hint_color: u32 = 0xFF808080,
+    /// How big the text is, and its face: a TrueType or OpenType file's
+    /// bytes, or empty for the system's.
+    font_size: f32 = 16,
+    font: []const u8 = "",
+};
+
+/// One box of a `Look`: its fill, its edge, its corners, the room between
+/// its edge and its text, and its text's colour.
+pub const Box = struct {
+    background: u32 = 0xFFFFFFFF,
+    border: u32 = 0,
+    border_width: f32 = 0,
+    corner_radius: f32 = 0,
+    padding_x: f32 = 0,
+    padding_y: f32 = 0,
+    text: u32 = 0xFF000000,
+};
+
+/// What a field edited where the system shows it holds now, whole: see
+/// `Context.editedText`. The same shape as `Field`'s text and caret.
+pub const Edited = struct {
+    text: []const u8 = "",
+    selection_start: usize = 0,
+    selection_end: usize = 0,
+};
+
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------

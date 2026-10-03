@@ -259,6 +259,15 @@ pub const SurfaceEvent = struct {
     height: u32,
 };
 
+/// The keyboard put away from a text field the system showed: see
+/// `Event.text_done`.
+pub const TextDoneEvent = struct {
+    window: WindowId,
+    /// Finished with its Done or Enter, rather than put away: what Enter in
+    /// the program's own field would have said.
+    submitted: bool,
+};
+
 /// Everything that can happen.
 pub const Event = union(enum) {
     /// The user asked for the window to close - the button, alt+F4, the window
@@ -327,6 +336,16 @@ pub const Event = union(enum) {
     /// like anything else.
     preedit: WindowId,
 
+    /// The text field the program described with `Window.setTextInputField`
+    /// was edited where the system shows it: a phone's bar above its
+    /// keyboard. What it holds now is `Context.editedText`, whole, which the
+    /// program puts in its field in place of what was there. Never sent on a
+    /// desktop, where the typing happens in the program's own field.
+    text_edited: WindowId,
+    /// The person is done with the keyboard: they put it away, tapped past
+    /// it, or pressed its Done. See `TextDoneEvent`.
+    text_done: TextDoneEvent,
+
     /// A controller was plugged in, or turned on, or came back into range.
     /// Carries the slot, which is what `Context.gamepad` takes.
     ///
@@ -341,7 +360,7 @@ pub const Event = union(enum) {
     /// process rather than a window.
     pub fn window(self: Event) WindowId {
         return switch (self) {
-            .close, .refresh, .surface_lost, .preedit => |id| id,
+            .close, .refresh, .surface_lost, .preedit, .text_edited => |id| id,
             .suspended, .resumed, .low_memory => .none,
             // A controller belongs to the machine, not to a window.
             .gamepad_connected, .gamepad_disconnected => .none,
@@ -371,6 +390,8 @@ test "every event says which window it is about" {
     try testing.expectEqual(id, (Event{ .scale = .{ .window = id, .x = 2, .y = 2 } }).window());
     try testing.expectEqual(id, (Event{ .file_dialog = .{ .window = id, .id = @enumFromInt(1), .paths = &.{} } }).window());
     try testing.expectEqual(id, (Event{ .touch = .{ .window = id, .finger = 2, .phase = .down, .x = 1, .y = 1 } }).window());
+    try testing.expectEqual(id, (Event{ .text_edited = id }).window());
+    try testing.expectEqual(id, (Event{ .text_done = .{ .window = id, .submitted = true } }).window());
 }
 
 test "the process-wide events belong to no window" {
@@ -402,6 +423,7 @@ test "a switch over events compiles for every case" {
         .surface_lost, .surface_created => "surface",
         .safe_area => "safe area",
         .preedit => "preedit",
+        .text_edited, .text_done => "text field",
         .suspended, .resumed, .low_memory => "lifecycle",
         .gamepad_connected, .gamepad_disconnected => "gamepad",
     };

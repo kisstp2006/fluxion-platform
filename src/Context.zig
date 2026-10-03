@@ -378,6 +378,14 @@ pub fn preedit(self: *const Context) text_mod.Preedit {
 /// a caller never has to check for null.
 const empty_preedit: text_mod.Preedit = .{};
 
+/// What the text field the system shows holds after the last
+/// `.text_edited`: its whole text and caret. Valid until the next `pump`,
+/// and empty on a backend that shows none. See `Window.setTextInputField`.
+pub fn editedText(self: *const Context) text_mod.Edited {
+    const get = self.vtable.editedText orelse return .{};
+    return (get(self.impl) orelse return .{}).*;
+}
+
 /// Unbind whatever OpenGL context this thread had.
 ///
 /// For a thread that is handing its context to another one, and for a program

@@ -310,6 +310,23 @@ pub fn setTextInputArea(self: Window, area: text.Area) Error!void {
     try self.ctx.vtable.setTextInputArea(self.ctx.impl, e.native, area);
 }
 
+/// What the text field with the keyboard holds, for a system that shows and
+/// edits it somewhere of its own: a phone puts it in a bar above its
+/// keyboard, so the person sees what they type while the keyboard covers the
+/// field. Nothing on a desktop, where the typing happens in the program's
+/// field.
+///
+/// Once a program has said this, the bar's edits come back as `.text_edited`
+/// - the whole text, in `Context.editedText` - rather than as `.char`, and
+/// the end of typing as `.text_done`. Said again whenever the program
+/// changes the text itself; not for a change `.text_edited` brought, which
+/// the bar has already.
+pub fn setTextInputField(self: Window, field: text.Field) Error!void {
+    const e = self.ctx.entry(self.id) orelse return error.Unavailable;
+    const set = self.ctx.vtable.setTextInputField orelse return;
+    try set(self.ctx.impl, e.native, field);
+}
+
 // -------------------------------------------------------------------------
 // OpenGL
 // -------------------------------------------------------------------------

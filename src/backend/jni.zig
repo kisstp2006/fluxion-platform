@@ -136,8 +136,14 @@ pub const NativeInterface = extern struct {
     NewObjectArray: ?*const fn (JniEnv, i32, JClass, JObject) callconv(.c) JObject = null, // 172
     GetObjectArrayElement: ?*const fn (JniEnv, JObject, i32) callconv(.c) JObject = null, // 173
     SetObjectArrayElement: ?*const fn (JniEnv, JObject, i32, JObject) callconv(.c) void = null, // 174
-    /// 175 to 214: the primitive arrays.
-    unused_175: [40]?*anyopaque = @splat(null),
+    /// 175: `NewBooleanArray`.
+    unused_175: [1]?*anyopaque = @splat(null),
+    NewByteArray: ?*const fn (JniEnv, i32) callconv(.c) JObject = null, // 176
+    /// 177 to 207: the other primitive arrays' making, getting and setting.
+    unused_177: [31]?*anyopaque = @splat(null),
+    SetByteArrayRegion: ?*const fn (JniEnv, JObject, i32, i32, [*]const i8) callconv(.c) void = null, // 208
+    /// 209 to 214: setting the wider primitive arrays.
+    unused_209: [6]?*anyopaque = @splat(null),
     RegisterNatives: ?*const fn (JniEnv, JClass, [*]const NativeMethod, i32) callconv(.c) i32 = null, // 215
 };
 
@@ -227,6 +233,8 @@ test "the JNI slots are where the specification puts them" {
         .{ "NewObjectArray", 172 },
         .{ "GetObjectArrayElement", 173 },
         .{ "SetObjectArrayElement", 174 },
+        .{ "NewByteArray", 176 },
+        .{ "SetByteArrayRegion", 208 },
         .{ "RegisterNatives", 215 },
     };
     inline for (slots) |slot| {

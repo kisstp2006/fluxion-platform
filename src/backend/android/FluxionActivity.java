@@ -1,31 +1,58 @@
 // SPDX-License-Identifier: BSL-1.0
 //
 // The one piece of Java fluxion-platform has: a NativeActivity that hears the
-// answer to an activity it started. NativeActivity never hands
-// onActivityResult to native code, and the system's document picker answers
-// nowhere else. An app names this class in its manifest where it would name
+// answer to an activity it started, and that has a text field for a soft
+// keyboard to type into. NativeActivity never hands onActivityResult to native
+// code, and the system's document picker answers nowhere else; and it has no
+// InputConnection, so a soft keyboard has nowhere to put what it types. An app
+// names this class in its manifest where it would name
 // android.app.NativeActivity, and packs `zig build android-dex`'s classes.dex
 // into its APK - see the README.
 
 package dev.fluxion.platform;
 
+import android.app.Dialog;
 import android.app.NativeActivity;
 import android.content.ClipData;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Color;
 import android.graphics.Insets;
+import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
+import android.text.Editable;
+import android.text.InputFilter;
+import android.text.InputType;
+import android.text.TextWatcher;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
+import android.view.ViewGroup;
+import android.view.Window;
 import android.view.WindowInsets;
+import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
 import android.webkit.MimeTypeMap;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.ArrayList;
 
-public class FluxionActivity extends NativeActivity {
+// It is the bar's TextWatcher itself: `android-dex` compiles one class file,
+// so there is no inner class to be one.
+public class FluxionActivity extends NativeActivity implements TextWatcher {
     /** Registered by the native library as the activity starts. */
     private static native void answered(int id, String[] names, String[] uris);
 
@@ -199,6 +226,216 @@ public class FluxionActivity extends NativeActivity {
             answered(id, names.toArray(new String[0]), uris.toArray(new String[0]));
         } catch (UnsatisfiedLinkError e) {
             // No native half to tell: a process started afresh to hear its last one's answer.
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The text bar
+    // ------------------------------------------------------------------
+
+    /** What the person typed into the bar, and where its caret is, in UTF-16 units. */
+    private static native void textBarEdited(String text, int start, int end);
+
+    /** The bar put away: by its Done or Enter (`submitted`), or by back or a tap past it. */
+    private static native void textBarDone(boolean submitted);
+
+    /**
+     * A text field above the soft keyboard, in a window of its own, so the
+     * keyboard pushes it up rather than the program's surface: the person
+     * sees what they type while the keyboard covers the program's own field.
+     */
+    private Dialog bar;
+    private LinearLayout barRow;
+    private EditText barText;
+    private Button barButton;
+    /** The button's own background, for the bar's own look. */
+    private Drawable barButtonLook;
+    /** Set while the program writes the bar, so the change is not sent back to it. */
+    private boolean barQuiet;
+    private boolean barMultiline;
+
+    /** Show the bar with this text, or bring an open one up to it. Called on the program's thread. */
+    public void showTextBar(String text, int start, int end, boolean password, boolean multiline, int maxLength, String hint) {
+        runOnUiThread(() -> openBar(text, start, end, password, multiline, maxLength, hint));
+    }
+
+    /**
+     * The program's own look for the bar - its field's, its button's, its
+     * panel's - so it looks like the field it stands for; or, with `own`
+     * false, the bar's. Colours are ARGB, sizes pixels, and `font` a face's
+     * file or null. Called on the program's thread, which writes the face
+     * out where `Typeface` can read it.
+     */
+    public void setTextBarLook(boolean own, int barColor,
+            int field, int fieldBorder, float fieldBorderWidth, float fieldRadius, float fieldPaddingX, float fieldPaddingY, int text, int hint, float textSize,
+            int button, int buttonBorder, float buttonBorderWidth, float buttonRadius, float buttonPaddingX, float buttonPaddingY, int buttonText,
+            byte[] font) {
+        Typeface face = own && font != null ? faceOf(font) : null;
+        runOnUiThread(() -> {
+            if (bar == null) makeBar();
+            if (!own) {
+                plainLook();
+                return;
+            }
+            barRow.setBackgroundColor(barColor);
+            barText.setBackground(box(field, fieldBorder, fieldBorderWidth, fieldRadius));
+            barText.setPadding(Math.round(fieldPaddingX), Math.round(fieldPaddingY), Math.round(fieldPaddingX), Math.round(fieldPaddingY));
+            barText.setTextColor(text);
+            barText.setHintTextColor(hint);
+            barText.setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize);
+            barText.setTypeface(face);
+            barButton.setBackground(box(button, buttonBorder, buttonBorderWidth, buttonRadius));
+            barButton.setPadding(Math.round(buttonPaddingX), Math.round(buttonPaddingY), Math.round(buttonPaddingX), Math.round(buttonPaddingY));
+            barButton.setTextColor(buttonText);
+            barButton.setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize);
+            barButton.setTypeface(face);
+        });
+    }
+
+    /** The bar's own look: a dark field with white text, and the system's button. */
+    private void plainLook() {
+        float density = getResources().getDisplayMetrics().density;
+        int padding = (int) (8 * density);
+        barRow.setBackgroundColor(0xF0202024);
+        barText.setBackground(box(0xFF2E2E34, 0xFF5A5A66, Math.max(1, density), 6 * density));
+        barText.setPadding(padding + padding / 2, padding, padding + padding / 2, padding);
+        barText.setTextColor(Color.WHITE);
+        barText.setHintTextColor(0xFF8A8A94);
+        barText.setTextSize(18);
+        barText.setTypeface(null);
+        barButton.setBackground(barButtonLook);
+        barButton.setTextColor(Color.BLACK);
+        barButton.setTextSize(14);
+        barButton.setTypeface(null);
+    }
+
+    private static GradientDrawable box(int fill, int edge, float width, float radius) {
+        GradientDrawable box = new GradientDrawable();
+        box.setColor(fill);
+        box.setCornerRadius(radius);
+        if (width > 0) box.setStroke(Math.max(1, Math.round(width)), edge);
+        return box;
+    }
+
+    /** A face from a file's bytes, written where `Typeface` reads from; null when it cannot be read. */
+    private Typeface faceOf(byte[] font) {
+        File file = new File(getCacheDir(), "text-bar-face");
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write(font);
+        } catch (IOException e) {
+            return null;
+        }
+        try {
+            return Typeface.createFromFile(file);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** Put the bar away without a word back: the program asked. */
+    public void hideTextBar() {
+        runOnUiThread(() -> {
+            if (bar != null && bar.isShowing()) bar.dismiss();
+        });
+    }
+
+    private void openBar(String text, int start, int end, boolean password, boolean multiline, int maxLength, String hint) {
+        if (bar == null) makeBar();
+        barQuiet = true;
+        barText.setHint(hint);
+        barMultiline = multiline;
+        int type = InputType.TYPE_CLASS_TEXT;
+        if (password) type |= InputType.TYPE_TEXT_VARIATION_PASSWORD;
+        if (multiline) type |= InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+        if (barText.getInputType() != type) barText.setInputType(type);
+        barText.setMaxLines(multiline ? 4 : 1);
+        barText.setFilters(maxLength > 0 ? new InputFilter[] { new InputFilter.LengthFilter(maxLength) } : new InputFilter[0]);
+        if (!barText.getText().toString().equals(text)) barText.setText(text);
+        int length = barText.length();
+        barText.setSelection(Math.max(0, Math.min(start, length)), Math.max(0, Math.min(end, length)));
+        barQuiet = false;
+        // The window asks for the keyboard as it takes the focus.
+        if (!bar.isShowing()) {
+            bar.show();
+            barText.requestFocus();
+        }
+    }
+
+    private void makeBar() {
+        float density = getResources().getDisplayMetrics().density;
+        int padding = (int) (8 * density);
+
+        barText = new EditText(this);
+        // The bar is the field: never the keyboard's own full-screen one.
+        barText.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN);
+        barText.addTextChangedListener(this);
+        barText.setOnEditorActionListener((view, action, key) -> {
+            boolean enter = key != null && key.getKeyCode() == KeyEvent.KEYCODE_ENTER && key.getAction() == KeyEvent.ACTION_DOWN;
+            if (action == EditorInfo.IME_ACTION_DONE || (enter && !barMultiline)) {
+                finishBar(true);
+                return true;
+            }
+            return false;
+        });
+
+        barButton = new Button(this);
+        barButton.setText(android.R.string.ok);
+        barButton.setOnClickListener(view -> finishBar(true));
+        barButtonLook = barButton.getBackground();
+
+        barRow = new LinearLayout(this);
+        barRow.setOrientation(LinearLayout.HORIZONTAL);
+        barRow.setGravity(Gravity.CENTER_VERTICAL);
+        barRow.setPadding(padding, padding / 2, padding, padding / 2);
+        barRow.addView(barText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        LinearLayout.LayoutParams beside = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        beside.setMarginStart(padding);
+        barRow.addView(barButton, beside);
+
+        // In the bar's own look until the program gives its own.
+        plainLook();
+
+        bar = new Dialog(this);
+        bar.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        bar.setContentView(barRow);
+        // Back, or a tap past it: done, and not submitted.
+        bar.setCanceledOnTouchOutside(true);
+        bar.setOnCancelListener(dialog -> textDone(false));
+        Window window = bar.getWindow();
+        window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        window.setGravity(Gravity.BOTTOM);
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+    }
+
+    private void finishBar(boolean submitted) {
+        if (bar != null && bar.isShowing()) bar.dismiss();
+        textDone(submitted);
+    }
+
+    private static void textDone(boolean submitted) {
+        try {
+            textBarDone(submitted);
+        } catch (UnsatisfiedLinkError e) {
+            // No native half to tell.
+        }
+    }
+
+    @Override
+    public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+
+    @Override
+    public void onTextChanged(CharSequence text, int start, int before, int count) {}
+
+    /** Every change, whole: what the keyboard composes is part of it until it commits. */
+    @Override
+    public void afterTextChanged(Editable text) {
+        if (barQuiet) return;
+        try {
+            textBarEdited(text.toString(), barText.getSelectionStart(), barText.getSelectionEnd());
+        } catch (UnsatisfiedLinkError e) {
+            // No native half to tell.
         }
     }
 

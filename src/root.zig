@@ -249,6 +249,7 @@ test {
     _ = @import("backend/android_text.zig");
     _ = @import("backend/android_clipboard.zig");
     _ = @import("backend/android_dialog.zig");
+    _ = @import("backend/android_text_bar.zig");
     // And the web backend in full: off a browser it talks to `web_stub.zig`,
     // a fake page, so the whole path from a record to an event is checked on
     // whatever machine runs the tests.

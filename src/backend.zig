@@ -372,6 +372,15 @@ pub const Vtable = struct {
     /// Owned by the backend and valid until the next `pump`.
     preedit: *const fn (impl: Impl) ?*const text.Preedit,
 
+    /// Show and edit the text field with the keyboard somewhere of the
+    /// system's own: a phone's bar above its keyboard. Null on a backend
+    /// where the typing happens in the program's own field.
+    setTextInputField: ?*const fn (impl: Impl, native: NativeWindow, field: text.Field) Error!void = null,
+
+    /// What that field holds after the last `.text_edited`. Owned by the
+    /// backend and valid until the next `pump`.
+    editedText: ?*const fn (impl: Impl) ?*const text.Edited = null,
+
     /// Put text on the system clipboard. Checked by the context first: it is
     /// UTF-8, and a backend converts only what its system keeps differently.
     setClipboardText: *const fn (impl: Impl, text: []const u8) Error!void,
