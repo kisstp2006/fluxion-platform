@@ -897,11 +897,7 @@ back what the browser really gave. But `getProcAddress` answers null for every
 name: WebGL is JavaScript, a wasm module calls it through imports rather than
 pointers, and [Fluxion WebGL](https://github.com/kisstp2006/fluxion-webgl) is
 the binding that declares them. Both glues can own one canvas — whichever asks
-for a context first makes it, and the other gets the same one. A context this
-glue makes has `EXT_color_buffer_float`, `EXT_color_buffer_half_float` and
-`EXT_texture_filter_anisotropic` switched on where the browser has them: a
-module has no `getExtension` to ask with, and each only adds to what it can
-do — float colour targets and the anisotropy limit — which it finds by trying.
+for a context first makes it, and the other gets the same one.
 
 ### Files, under WASI
 

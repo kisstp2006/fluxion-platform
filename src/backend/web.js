@@ -95,9 +95,6 @@ const MOD = { shift: 1, control: 2, alt: 4, super: 8, capsLock: 16, numLock: 32,
 const FLAG = { resizable: 1, decorated: 2, visible: 4, maximized: 8 };
 const CONTEXT = { depth: 1, stencil: 2, antialias: 4 };
 
-/// The WebGL extensions a context is given as it is made: see `makeContext`.
-const WIDENING = ["EXT_color_buffer_float", "EXT_color_buffer_half_float", "EXT_texture_filter_anisotropic"];
-
 /// `openFileDialog`'s flags.
 const DIALOG = { multiple: 1, folder: 2 };
 
@@ -1944,12 +1941,6 @@ export class Platform {
   /// attributes it is asked for - which is how this and `fluxion-webgl.js`
   /// share one. The attributes the context really has are read back
   /// afterwards, in `writeInfo`.
-  ///
-  /// The extensions in `WIDENING` are switched on as soon as it is made. A
-  /// module cannot do that itself - `getExtension` is JavaScript, and the
-  /// binding has no import for it - and each only adds to what the context
-  /// can do: float colour targets and the anisotropy limit, which a module
-  /// finds out about by trying. One the browser lacks is simply not there.
   makeContext(win, version, flags) {
     const attributes = {
       // Opaque: on a page an alpha channel is transparency against whatever
@@ -1978,7 +1969,6 @@ export class Platform {
     win.gl = gl;
     win.glVersion = got;
     if (!gl) return;
-    for (const name of WIDENING) gl.getExtension(name);
 
     const options = { signal: win.controller.signal };
     // Prevented, or the browser never tries to give the context back.
