@@ -232,8 +232,10 @@ pub fn setOpacity(self: Window, opacity: f32) Error!void {
 
 /// Give it the system's frame and title bar, or take them away - a
 /// borderless window - keeping its content area where and how big it is.
-/// `error.Unavailable` where the system decides: a phone, a page, and
-/// Wayland, whose windows here have no frame of the system's to give.
+/// On Wayland the compositor draws the frame, asked through xdg-decoration.
+/// `error.Unavailable` where the system decides: a phone, a page, and a
+/// Wayland compositor without xdg-decoration, whose windows here have no
+/// frame of the system's to give.
 pub fn setDecorated(self: Window, on: bool) Error!void {
     const e = self.ctx.entry(self.id) orelse return error.Unavailable;
     try self.ctx.vtable.setDecorated(self.ctx.impl, e.native, on);

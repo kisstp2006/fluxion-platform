@@ -39,7 +39,7 @@ all.
 | --- | --- |
 | `win32` | Window, message pump, keyboard, mouse, wheel, resize, DPI, monitors, fullscreen with mode switching, XInput controllers, WGL, Vulkan surface, IMM32 text and composition, clipboard, file and folder dialogs, dropped files |
 | `x11` | Window, event loop, keyboard, mouse, wheel, resize, focus, `Xft.dpi`, RandR monitors, fullscreen with mode switching, evdev controllers, GLX, Vulkan surface, XIM text, clipboard, file and folder dialogs, dropped files |
-| `wayland` | Window, xdg-shell, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard, file and folder dialogs, dropped files |
+| `wayland` | Window, xdg-shell, xdg-decoration, event loop, keyboard, mouse, wheel, resize, focus, `wl_output` monitors, fullscreen, evdev controllers, EGL, Vulkan surface, xkbcommon text and compose, clipboard, file and folder dialogs, dropped files |
 | `android` | Activity lifecycle, surface create and loss, focus, keys, multi-touch, screen and density, controllers, EGL, Vulkan surface, soft keyboard and text, clipboard, file and folder dialogs (with `FluxionActivity`) |
 | `web` | Canvas, both loop models, keyboard, text and composition, a phone's text bar, mouse, multi-touch, wheel, pointer lock, fullscreen, device pixel ratio, screen, gamepads, WebGL context and its loss, dropped files, clipboard, file and folder dialogs |
 | `none` | Compiles and runs everywhere, makes no windows |
@@ -69,6 +69,16 @@ is not mapped, and on Android an unmapped window is not touchable either -
 keys reach it because focus is a window-manager idea, but touch is routed by
 hit-testing what is on screen. That is not a gap here, it is the platform,
 and it is why `createWindow` hands back a surface a renderer then presents to.
+On Wayland `createWindow` waits for the compositor's first configure before it
+returns, and a swap before one is not shown: a buffer on a surface not yet
+configured is a protocol error, which a strict compositor ends the connection
+for.
+
+**A Wayland window's frame is the compositor's**, asked for through
+xdg-decoration: a decorated window asks for it, a borderless one for none,
+and `setDecorated` changes its mind. A compositor without xdg-decoration
+draws its own frame or none whatever is asked, and `setDecorated` is
+`error.Unavailable` there.
 
 ## Install
 

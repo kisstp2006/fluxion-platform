@@ -565,6 +565,57 @@ fn buildForeignInterfaces(core: CoreInterfaces) void {
     };
 }
 
+// xdg-decoration (unstable v1): asking the compositor to draw a window's
+// frame - its title bar and its buttons - or not. A compositor that has it
+// may leave a window that never asks with no frame at all, and one that
+// does not have it draws its own or none whatever is asked.
+var decoration_manager_interface: WlInterface = undefined;
+var toplevel_decoration_interface: WlInterface = undefined;
+var decoration_types: [3]?*const WlInterface = @splat(null);
+var decoration_manager_requests: [2]WlMessage = undefined;
+var toplevel_decoration_requests: [3]WlMessage = undefined;
+var toplevel_decoration_events: [1]WlMessage = undefined;
+
+const decoration_manager_destroy: u32 = 0;
+const decoration_manager_get_toplevel_decoration: u32 = 1;
+const toplevel_decoration_destroy: u32 = 0;
+const toplevel_decoration_set_mode: u32 = 1;
+/// `zxdg_toplevel_decoration_v1.mode`: the program draws its frame, or the
+/// compositor does.
+const decoration_client_side: u32 = 1;
+const decoration_server_side: u32 = 2;
+
+fn buildDecorationInterfaces() void {
+    decoration_types = .{ &toplevel_decoration_interface, &xdg_toplevel_interface, null };
+    const none: [*]const ?*const WlInterface = @ptrCast(&decoration_types[2]);
+    decoration_manager_requests = .{
+        .{ .name = "destroy", .signature = "", .types = none },
+        .{ .name = "get_toplevel_decoration", .signature = "no", .types = @ptrCast(&decoration_types[0]) },
+    };
+    decoration_manager_interface = .{
+        .name = "zxdg_decoration_manager_v1",
+        .version = 1,
+        .method_count = decoration_manager_requests.len,
+        .methods = &decoration_manager_requests,
+        .event_count = 0,
+        .events = null,
+    };
+    toplevel_decoration_requests = .{
+        .{ .name = "destroy", .signature = "", .types = none },
+        .{ .name = "set_mode", .signature = "u", .types = none },
+        .{ .name = "unset_mode", .signature = "", .types = none },
+    };
+    toplevel_decoration_events = .{.{ .name = "configure", .signature = "u", .types = none }};
+    toplevel_decoration_interface = .{
+        .name = "zxdg_toplevel_decoration_v1",
+        .version = 1,
+        .method_count = toplevel_decoration_requests.len,
+        .methods = &toplevel_decoration_requests,
+        .event_count = toplevel_decoration_events.len,
+        .events = &toplevel_decoration_events,
+    };
+}
+
 var wm_base_requests: [4]WlMessage = undefined;
 var wm_base_events: [1]WlMessage = undefined;
 var xdg_surface_requests: [5]WlMessage = undefined;
@@ -787,6 +838,9 @@ const Impl = struct {
     exported: ?*Proxy = null,
     export_handle: [256]u8 = undefined,
     export_handle_len: usize = 0,
+    /// xdg-decoration, where the compositor has it: what a window asks for
+    /// its frame with.
+    decoration_manager: ?*Proxy = null,
 };
 
 /// One `wl_data_offer`, the best of `text_types` it has said it can give, and
@@ -871,6 +925,8 @@ const Native = struct {
     surface: *Proxy,
     xdg_surface: *Proxy,
     toplevel: *Proxy,
+    /// What asks the compositor for its frame, where it has xdg-decoration.
+    decoration: ?*Proxy = null,
     id: event.WindowId,
     impl: *Impl,
     width: u32,
@@ -1054,6 +1110,7 @@ pub fn open(gpa: Allocator) Error!backend.Impl {
     buildXdgInterfaces(core);
     buildPointerInterfaces(core);
     buildForeignInterfaces(core);
+    buildDecorationInterfaces();
 
     self.* = .{
         .gpa = gpa,
@@ -1569,6 +1626,7 @@ fn deinit(impl: backend.Impl, gpa: Allocator) void {
     }
     unexport(self);
     if (self.exporter) |exporter| requestDestroy(self, exporter, exporter_destroy);
+    if (self.decoration_manager) |manager| requestDestroy(self, manager, decoration_manager_destroy);
     self.answers.deinit();
 
     if (self.cursor_surface) |surface| requestDestroy(self, surface, surface_destroy);
@@ -1676,6 +1734,8 @@ fn onGlobal(
         self.data_manager = bindGlobal(self, registry, name, self.core.wl_data_device_manager_interface, @min(version, 3));
     } else if (std.mem.eql(u8, text, "zxdg_exporter_v2")) {
         self.exporter = bindGlobal(self, registry, name, &exporter_interface, 1);
+    } else if (std.mem.eql(u8, text, "zxdg_decoration_manager_v1")) {
+        self.decoration_manager = bindGlobal(self, registry, name, &decoration_manager_interface, 1);
     }
 }
 
@@ -2686,12 +2746,28 @@ fn createWindow(
     try sendTitle(self, toplevel, desc.title);
     native.resizable = desc.resizable;
     if (!desc.resizable) sendSizeHints(self, native);
+    // The frame asked for before the first commit, as the protocol wants:
+    // the compositor's, or - for a borderless window, which draws none of
+    // its own - none.
+    if (self.decoration_manager) |manager| {
+        var decoration_args = [_]WlArgument{ .{ .n = 0 }, .{ .o = toplevel } };
+        native.decoration = construct(self, manager, decoration_manager_get_toplevel_decoration, &toplevel_decoration_interface, 1, &decoration_args);
+        if (native.decoration) |decoration| askFrame(self, decoration, desc.decorated);
+    }
 
     // The first commit with no buffer is what asks the compositor for a
     // configure. Nothing is on screen yet, and nothing can be until a renderer
     // attaches a buffer - which is the protocol, not a gap here.
     request(self, surface, surface_commit, null);
     _ = w.wl_display_flush(self.display);
+    // And the configure waited for: a buffer on a surface whose first one
+    // is not acknowledged is a protocol error, which a strict compositor
+    // ends the connection for - every window gone, every swap after it
+    // refused - and the first frame drawn would be one.
+    var tries: usize = 0;
+    while (!native.configured and tries < 10) : (tries += 1) {
+        if (w.wl_display_roundtrip(self.display) < 0) break;
+    }
 
     if (desc.gl) |config| {
         const share = if (desc.gl_share) |other| (castWindow(other).context orelse return error.Unavailable).handle else null;
@@ -2757,6 +2833,12 @@ fn swapBuffers(impl: backend.Impl, native: backend.NativeWindow) Error!void {
     const win = castWindow(native);
     const context = win.context orelse return error.Unavailable;
     const display = self.gl.display orelse return error.Unavailable;
+    // Not shown before the compositor has said the window is there: see
+    // `createWindow`.
+    if (!win.configured) {
+        _ = self.w.wl_display_roundtrip(self.display);
+        if (!win.configured) return;
+    }
 
     // The buffer this swap produces is the one the compositor will show, so the
     // `wl_egl_window` has to already be the size the last configure asked for -
@@ -3302,7 +3384,9 @@ fn destroyWindow(impl: backend.Impl, gpa: Allocator, native: backend.NativeWindo
     if (self.keyboard_focus == win) self.keyboard_focus = null;
 
     // In order, innermost first: a toplevel outliving its surface is a protocol
-    // error and the compositor drops the connection for it.
+    // error and the compositor drops the connection for it, and so is a
+    // decoration outliving its toplevel.
+    if (win.decoration) |decoration| requestDestroy(self, decoration, toplevel_decoration_destroy);
     requestDestroy(self, win.toplevel, toplevel_destroy);
     requestDestroy(self, win.xdg_surface, xdg_surface_destroy);
     requestDestroy(self, win.surface, surface_destroy);
@@ -3446,11 +3530,22 @@ fn setResizable(impl: backend.Impl, native: backend.NativeWindow, on: bool) Erro
     _ = self.w.wl_display_flush(self.display);
 }
 
-/// A frame is the compositor's to draw or not: with no decoration protocol
-/// bound, a program has nothing to ask it with.
+/// A frame is the compositor's to draw or not, asked for through
+/// xdg-decoration: with none bound, a program has nothing to ask it with.
 fn setDecorated(impl: backend.Impl, native: backend.NativeWindow, on: bool) Error!void {
-    _ = .{ impl, native, on };
-    return error.Unavailable;
+    const self = cast(impl);
+    const win = castWindow(native);
+    const decoration = win.decoration orelse return error.Unavailable;
+    askFrame(self, decoration, on);
+    request(self, win.surface, surface_commit, null);
+    _ = self.w.wl_display_flush(self.display);
+}
+
+/// Ask for the compositor's frame, or for none: the program draws none of
+/// its own, so "client side" is no frame.
+fn askFrame(self: *Impl, decoration: *Proxy, on: bool) void {
+    var mode = [_]WlArgument{.{ .u = if (on) decoration_server_side else decoration_client_side }};
+    request(self, decoration, toplevel_decoration_set_mode, &mode);
 }
 
 /// The stacking of windows is the compositor's alone.
@@ -3691,6 +3786,32 @@ test "the signatures are the ones on the wire" {
     // `iia`: two ints and the state array.
     try testing.expectEqualStrings("iia", std.mem.span(xdg_toplevel_interface.events.?[0].signature));
     try testing.expectEqualStrings("", std.mem.span(xdg_toplevel_interface.events.?[1].signature));
+}
+
+test "the decoration descriptors match xdg-decoration, and name the toplevel they frame" {
+    buildXdgInterfaces(fakeCore());
+    buildDecorationInterfaces();
+
+    try testing.expectEqualStrings("zxdg_decoration_manager_v1", std.mem.span(decoration_manager_interface.name));
+    try testing.expectEqual(@as(c_int, 2), decoration_manager_interface.method_count);
+    try testing.expectEqual(@as(c_int, 0), decoration_manager_interface.event_count);
+    const manager = decoration_manager_interface.methods.?;
+    try testing.expectEqualStrings("get_toplevel_decoration", std.mem.span(manager[decoration_manager_get_toplevel_decoration].name));
+    try testing.expectEqualStrings("no", std.mem.span(manager[decoration_manager_get_toplevel_decoration].signature));
+    try testing.expectEqualStrings("destroy", std.mem.span(manager[decoration_manager_destroy].name));
+    // A new decoration, for an xdg_toplevel.
+    const types = manager[decoration_manager_get_toplevel_decoration].types;
+    try testing.expectEqual(@as(?*const WlInterface, &toplevel_decoration_interface), types[0]);
+    try testing.expectEqual(@as(?*const WlInterface, &xdg_toplevel_interface), types[1]);
+
+    try testing.expectEqualStrings("zxdg_toplevel_decoration_v1", std.mem.span(toplevel_decoration_interface.name));
+    try testing.expectEqual(@as(c_int, 3), toplevel_decoration_interface.method_count);
+    try testing.expectEqual(@as(c_int, 1), toplevel_decoration_interface.event_count);
+    const decoration = toplevel_decoration_interface.methods.?;
+    try testing.expectEqualStrings("set_mode", std.mem.span(decoration[toplevel_decoration_set_mode].name));
+    try testing.expectEqualStrings("u", std.mem.span(decoration[toplevel_decoration_set_mode].signature));
+    try testing.expectEqualStrings("destroy", std.mem.span(decoration[toplevel_decoration_destroy].name));
+    try testing.expectEqualStrings("configure", std.mem.span(toplevel_decoration_interface.events.?[0].name));
 }
 
 test "an object argument carries the interface it has to be" {
